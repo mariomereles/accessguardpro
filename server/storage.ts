@@ -39,6 +39,7 @@ export interface IStorage {
 
   // Gates
   getGate(id: string): Promise<Gate | undefined>;
+  getAllGates(): Promise<Gate[]>;
   getGatesByEvent(eventId: string): Promise<Gate[]>;
   createGate(gate: InsertGate): Promise<Gate>;
   updateGateStatus(id: string, isActive: boolean): Promise<void>;
@@ -114,6 +115,10 @@ export class DatabaseStorage implements IStorage {
   async getGate(id: string): Promise<Gate | undefined> {
     const [gate] = await db.select().from(gates).where(eq(gates.id, id)).limit(1);
     return gate;
+  }
+
+  async getAllGates(): Promise<Gate[]> {
+    return db.select().from(gates).orderBy(desc(gates.createdAt));
   }
 
   async getGatesByEvent(eventId: string): Promise<Gate[]> {

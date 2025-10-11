@@ -1,8 +1,11 @@
 import { Link } from "wouter";
 import { Button } from "@/components/ui/button";
 import { ScanLine, Shield, Zap, Users } from "lucide-react";
+import { useAuth } from "@/contexts/AuthContext";
 
 export default function Home() {
+  const { isAuthenticated } = useAuth();
+
   return (
     <div className="min-h-screen bg-background">
       {/* Hero Section */}
@@ -29,7 +32,9 @@ export default function Home() {
                 <Link href="/register">Register for Event</Link>
               </Button>
               <Button asChild variant="outline" size="lg" data-testid="button-admin">
-                <Link href="/admin/dashboard">Admin Dashboard</Link>
+                <Link href={isAuthenticated ? "/admin/dashboard" : "/login"}>
+                  {isAuthenticated ? "Admin Dashboard" : "Admin Login"}
+                </Link>
               </Button>
             </div>
           </div>

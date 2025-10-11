@@ -1,8 +1,17 @@
+import "dotenv/config";
 import { storage } from "./storage";
 import { hashPassword } from "./crypto";
+import { db } from "./db";
+import { users } from "@shared/schema";
+import { eq } from "drizzle-orm";
 
 async function seed() {
   console.log("Seeding database...");
+
+  // Delete existing users to recreate with Argon2
+  await db.delete(users).where(eq(users.email, "admin@event.com"));
+  await db.delete(users).where(eq(users.email, "staff@event.com"));
+  console.log("Deleted existing users");
 
   // Create admin user
   const adminPassword = await hashPassword("admin123");

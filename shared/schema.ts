@@ -10,6 +10,7 @@ export const ticketTypeEnum = pgEnum("ticket_type", ["GENERAL", "VIP", "STAFF"])
 export const eventStatusEnum = pgEnum("event_status", ["DRAFT", "ACTIVE", "ENDED", "CANCELLED"]);
 export const checkinMethodEnum = pgEnum("checkin_method", ["GATE_QR", "TICKET_QR"]);
 export const checkinResultEnum = pgEnum("checkin_result", ["OK", "DUP", "DENIED"]);
+export const gateCapacityTypeEnum = pgEnum("gate_capacity_type", ["limited", "unlimited", "unmeasured"]);
 
 // Users table
 export const users = pgTable("users", {
@@ -39,6 +40,8 @@ export const gates = pgTable("gates", {
   name: text("name").notNull(),
   location: text("location").notNull(),
   isActive: boolean("is_active").notNull().default(true),
+  capacityType: gateCapacityTypeEnum("capacity_type").notNull().default("unlimited"),
+  capacity: integer("capacity"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 

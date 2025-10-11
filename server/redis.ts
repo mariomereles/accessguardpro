@@ -44,7 +44,40 @@ class InMemoryRedis {
   }
 }
 
-// Use Redis if URL is provided, otherwise use in-memory fallback
-export const redis = process.env.REDIS_URL
-  ? new Redis(process.env.REDIS_URL)
-  : new InMemoryRedis() as any;
+// Export a mutable redis instance so we can fallback safely if connection fails
+export let redis: any;
+
+function createInMemory() {
+  return new InMemoryRedis() as any;
+}
+
+if (process.env.REDIS_URL) {
+  try {
+    const client = new Redis(process.env.REDIS_URL, {
+      // avoid aggressive reconnection loops in dev when Redis isn't running
+      enableOfflineQueue: false,
+      retryStrategy: () => null as any,
+    });
+
+    // if Redis emits an error (connection refused), fallback to in-memory and log once
+    const onError = (err: any) => {
+      console.error("[redis] connection error, falling back to in-memory Redis:", err && err.message ? err.message : err);
+      try {
+        client.disconnect();
+      } catch (_e) {
+        // ignore
+      }
+      redis = createInMemory();
+    };
+
+    client.once("error", onError);
+
+    // assign the client for normal usage; if it errors, the handler will replace `redis`
+    redis = client as any;
+  } catch (e) {
+    console.error("[redis] failed to construct ioredis client, using in-memory fallback", e);
+    redis = createInMemory();
+  }
+} else {
+  redis = createInMemory();
+}

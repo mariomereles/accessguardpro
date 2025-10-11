@@ -7,6 +7,8 @@ import {
   BarChart3,
   ScanLine,
   Ticket,
+  LogOut,
+  User,
 } from "lucide-react";
 import {
   Sidebar,
@@ -18,14 +20,19 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarHeader,
+  SidebarFooter,
 } from "@/components/ui/sidebar";
+import { Button } from "@/components/ui/button";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { useAuth } from "@/contexts/AuthContext";
+import { useToast } from "@/hooks/use-toast";
 
 const adminItems = [
   { title: "Dashboard", url: "/admin/dashboard", icon: LayoutDashboard },
   { title: "Gates", url: "/admin/gates", icon: DoorOpen },
   { title: "Attendees", url: "/admin/attendees", icon: Users },
-  { title: "Analytics", url: "/admin/analytics", icon: BarChart3 },
-  { title: "Settings", url: "/admin/settings", icon: Settings },
+  { title: "Events", url: "/admin/events", icon: BarChart3 },
+  { title: "Activity", url: "/admin/activity", icon: Settings },
 ];
 
 const staffItems = [
@@ -35,6 +42,18 @@ const staffItems = [
 
 export function AppSidebar() {
   const [location] = useLocation();
+  const { user, logout, isAdmin } = useAuth();
+  const { toast } = useToast();
+
+  const handleLogout = () => {
+    logout();
+    toast({
+      title: "👋 Sesión cerrada",
+      description: "Has cerrado sesión exitosamente",
+    });
+  };
+
+  const items = isAdmin ? adminItems : staffItems;
 
   return (
     <Sidebar data-testid="sidebar-main">
@@ -44,48 +63,22 @@ export function AppSidebar() {
             <ScanLine className="h-6 w-6 text-primary-foreground" />
           </div>
           <div>
-            <h2 className="font-bold text-lg">Event Control</h2>
-            <p className="text-xs text-muted-foreground">Access System</p>
+            <h2 className="font-bold text-lg">AccessGuard Pro</h2>
+            <p className="text-xs text-muted-foreground">Sistema de Control</p>
           </div>
         </div>
       </SidebarHeader>
 
       <SidebarContent>
         <SidebarGroup>
-          <SidebarGroupLabel>Admin</SidebarGroupLabel>
+          <SidebarGroupLabel>Panel de Control</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              {adminItems.map((item) => (
+              {items.map((item) => (
                 <SidebarMenuItem key={item.title}>
-                  <SidebarMenuButton
-                    asChild
-                    isActive={location === item.url}
-                    data-testid={`sidebar-link-${item.title.toLowerCase().replace(/\s+/g, "-")}`}
-                  >
+                  <SidebarMenuButton asChild isActive={location === item.url}>
                     <Link href={item.url}>
-                      <item.icon />
-                      <span>{item.title}</span>
-                    </Link>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ))}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
-
-        <SidebarGroup>
-          <SidebarGroupLabel>Staff</SidebarGroupLabel>
-          <SidebarGroupContent>
-            <SidebarMenu>
-              {staffItems.map((item) => (
-                <SidebarMenuItem key={item.title}>
-                  <SidebarMenuButton
-                    asChild
-                    isActive={location === item.url}
-                    data-testid={`sidebar-link-${item.title.toLowerCase().replace(/\s+/g, "-")}`}
-                  >
-                    <Link href={item.url}>
-                      <item.icon />
+                      <item.icon className="h-4 w-4" />
                       <span>{item.title}</span>
                     </Link>
                   </SidebarMenuButton>
@@ -95,6 +88,29 @@ export function AppSidebar() {
           </SidebarGroupContent>
         </SidebarGroup>
       </SidebarContent>
+
+      <SidebarFooter className="p-4">
+        <div className="flex items-center gap-3 mb-3">
+          <Avatar className="h-8 w-8">
+            <AvatarFallback className="text-xs">
+              {user?.email?.charAt(0).toUpperCase() || "U"}
+            </AvatarFallback>
+          </Avatar>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium truncate">{user?.email}</p>
+            <p className="text-xs text-muted-foreground capitalize">{user?.role?.toLowerCase()}</p>
+          </div>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleLogout}
+          className="w-full justify-start"
+        >
+          <LogOut className="h-4 w-4 mr-2" />
+          Cerrar Sesión
+        </Button>
+      </SidebarFooter>
     </Sidebar>
   );
 }

@@ -1,4 +1,5 @@
-const API_BASE = "/api";
+// Prefer explicit Vite environment variable VITE_API_BASE, fallback to localhost:5501
+const API_BASE = (import.meta as any).env?.VITE_API_BASE || "http://localhost:5501/api";
 
 let authToken: string | null = localStorage.getItem("authToken");
 let currentUser: any = null;
@@ -138,10 +139,24 @@ export const api = {
   },
 
   // Gates admin
+  getGates: async () => {
+    return fetchAPI("/gates");
+  },
+
   createGate: async (gateData: any) => {
     return fetchAPI("/gates", {
       method: "POST",
       body: JSON.stringify(gateData),
     });
+  },
+
+  // Auth helpers
+  getAuthToken: () => authToken,
+  getCurrentUser: () => currentUser,
+  clearAuthToken: () => {
+    authToken = null;
+    currentUser = null;
+    localStorage.removeItem("authToken");
+    localStorage.removeItem("currentUser");
   },
 };

@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AccessGuard Pro - Test Suite</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .test { margin: 10px 0; padding: 10px; border: 1px solid #ccc; }
+        .success { background-color: #d4edda; border-color: #c3e6cb; }
+        .error { background-color: #f8d7da; border-color: #f5c6cb; }
+        button { padding: 10px 20px; margin: 5px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <h1>🧪 AccessGuard Pro - Test Suite</h1>
+
+    <div class="test">
+        <h3>1. Login Test</h3>
+        <button onclick="testLogin()">Test Login</button>
+        <div id="login-result"></div>
+    </div>
+
+    <div class="test">
+        <h3>2. Protected Route Test</h3>
+        <button onclick="testGates()">Test /api/gates (should fail without auth)</button>
+        <button onclick="testGatesWithAuth()">Test /api/gates (with auth)</button>
+        <div id="gates-result"></div>
+    </div>
+
+    <div class="test">
+        <h3>3. Full Flow Test</h3>
+        <button onclick="testFullFlow()">Test Complete Flow</button>
+        <div id="full-result"></div>
+    </div>
+
+    <script>
+        let authToken = localStorage.getItem('authToken');
+
+        async function testLogin() {
+            const result = document.getElementById('login-result');
+            try {
+                const response = await fetch('http://localhost:5501/api/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        email: 'admin@event.com',
+                        password: 'admin123'
+                    })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    authToken = data.accessToken;
+                    localStorage.setItem('authToken', authToken);
+                    localStorage.setItem('currentUser', JSON.stringify(data.user));
+                    result.innerHTML = '<div class="success">✅ Login successful! Token saved.</div>';
+                } else {
+                    result.innerHTML = '<div class="error">❌ Login failed: ' + data.error + '</div>';
+                }
+            } catch (error) {
+                result.innerHTML = '<div class="error">❌ Error: ' + error.message + '</div>';
+            }
+        }
+
+        async function testGates() {
+            const result = document.getElementById('gates-result');
+            try {
+                const response = await fetch('http://localhost:5501/api/gates');
+                const data = await response.json();
+
+                if (response.status === 401) {
+                    result.innerHTML = '<div class="success">✅ Correctly blocked without auth (401)</div>';
+                } else {
+                    result.innerHTML = '<div class="error">❌ Should have been blocked without auth</div>';
+                }
+            } catch (error) {
+                result.innerHTML = '<div class="error">❌ Error: ' + error.message + '</div>';
+            }
+        }
+
+        async function testGatesWithAuth() {
+            const result = document.getElementById('gates-result');
+            if (!authToken) {
+                result.innerHTML = '<div class="error">❌ No auth token available. Run login test first.</div>';
+                return;
+            }
+
+            try {
+                const response = await fetch('http://localhost:5501/api/gates', {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+                const data = await response.json();
+
+                if (response.ok) {
+                    result.innerHTML = '<div class="success">✅ Gates endpoint accessible with auth. Found ' + data.length + ' gates.</div>';
+                } else {
+                    result.innerHTML = '<div class="error">❌ Auth failed: ' + response.status + ' - ' + JSON.stringify(data) + '</div>';
+                }
+            } catch (error) {
+                result.innerHTML = '<div class="error">❌ Error: ' + error.message + '</div>';
+            }
+        }
+
+        async function testFullFlow() {
+            const result = document.getElementById('full-result');
+            result.innerHTML = '🔄 Testing full authentication flow...';
+
+            try {
+                // 1. Login
+                const loginResponse = await fetch('http://localhost:5501/api/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        email: 'admin@event.com',
+                        password: 'admin123'
+                    })
+                });
+
+                if (!loginResponse.ok) {
+                    result.innerHTML = '<div class="error">❌ Login failed</div>';
+                    return;
+                }
+
+                const loginData = await loginResponse.json();
+                const token = loginData.accessToken;
+
+                // 2. Test protected endpoint
+                const gatesResponse = await fetch('http://localhost:5501/api/gates', {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+
+                if (gatesResponse.ok) {
+                    const gatesData = await gatesResponse.json();
+                    result.innerHTML = '<div class="success">✅ Full authentication flow successful! Login + Protected API access working.</div>';
+                } else {
+                    result.innerHTML = '<div class="error">❌ Protected API access failed after login</div>';
+                }
+            } catch (error) {
+                result.innerHTML = '<div class="error">❌ Error in full flow: ' + error.message + '</div>';
+            }
+        }
+    </script>
+</body>
+</html>

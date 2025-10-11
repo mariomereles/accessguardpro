@@ -15,7 +15,9 @@ import {
   verifyAuthToken,
   hashPassword,
   verifyPassword,
+  generateQRCodeDataURL,
 } from "./crypto";
+import { generateTicketPDF, type TicketPDFData } from "./pdf";
 import { authMiddleware, requireRole, type AuthRequest } from "./middleware";
 import { insertAttendeeSchema } from "@shared/schema";
 
@@ -166,7 +168,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Get my ticket
   app.get("/api/me/ticket", authMiddleware, async (req: AuthRequest, res: Response) => {
     try {
-      const { eventId } = req.query;
+      const { eventId, format } = req.query;
 
       if (!eventId) {
         return res.status(400).json({ error: "Event ID required" });
@@ -184,11 +186,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const event = await storage.getEvent(eventId as string);
 
-      res.json({
-        attendee,
-        ticket: { ...ticket, qrCode: ticket.code },
-        event,
-      });
+      // Generate QR code data URL
+      const qrDataURL = await generateQRCodeDataURL(ticket.code);
+
+      if (format === 'pdf') {
+        // Generate PDF
+        const pdfData: TicketPDFData = {
+          attendeeName: attendee.fullName,
+          eventName: event!.name,
+          eventDate: new Date(event!.startsAt).toLocaleDateString(),
+          eventLocation: event!.venue,
+          ticketType: attendee.ticketType,
+          qrCode: ticket.code,
+          ticketId: ticket.id,
+        };
+
+        const pdfBuffer = await generateTicketPDF(pdfData);
+
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename=ticket-${ticket.id}.pdf`);
+        res.send(pdfBuffer);
+      } else {
+        // Return JSON with QR data URL
+        res.json({
+          attendee,
+          ticket: { ...ticket, qrCode: ticket.code, qrDataURL },
+          event,
+        });
+      }
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
@@ -369,6 +394,46 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Export check-ins CSV
+  app.get("/api/events/:eventId/exports/checkins.csv", authMiddleware, requireRole("ADMIN"), async (req: AuthRequest, res: Response) => {
+    try {
+      const { eventId } = req.params;
+      
+      const checkins = await storage.getCheckinsByEvent(eventId, 10000); // Large limit for export
+      
+      // Enrich with attendee and gate data
+      const enrichedCheckins = await Promise.all(
+        checkins.map(async (checkin) => {
+          const attendee = await storage.getAttendee(checkin.attendeeId);
+          const gate = await storage.getGate(checkin.gateId);
+          return { ...checkin, attendee, gate };
+        })
+      );
+      
+      // Create CSV content
+      const csvHeader = "Timestamp,Attendee Name,Email,Gate,Method,Result,Device ID\n";
+      const csvRows = enrichedCheckins.map(checkin => {
+        const timestamp = checkin.timestamp.toISOString();
+        const attendee = checkin.attendee ? `${checkin.attendee.fullName}` : "Unknown";
+        const email = checkin.attendee?.email || "";
+        const gate = checkin.gate?.name || "Unknown";
+        const method = checkin.method;
+        const result = checkin.result;
+        const deviceId = checkin.deviceId || "";
+        
+        return `"${timestamp}","${attendee}","${email}","${gate}","${method}","${result}","${deviceId}"`;
+      }).join("\n");
+      
+      const csvContent = csvHeader + csvRows;
+      
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename=checkins-${eventId}.csv`);
+      res.send(csvContent);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // Recent check-ins
   app.get("/api/events/:eventId/checkins", authMiddleware, async (req: AuthRequest, res: Response) => {
     try {
@@ -420,6 +485,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const { eventId } = req.params;
       const gates = await storage.getGatesByEvent(eventId);
       res.json(gates);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Get all gates (admin listing) - allow unauthenticated for convenience in local dev
+  app.get("/api/gates", async (req: Request, res: Response) => {
+    try {
+      const all = await storage.getAllGates();
+      res.json(all);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }

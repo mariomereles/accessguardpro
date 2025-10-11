@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Login Test</title>
+</head>
+<body>
+    <h1>Login to AccessGuardPro</h1>
+    <button onclick="login()">Login as Admin</button>
+    <div id="result"></div>
+
+    <script>
+        async function login() {
+            try {
+                const response = await fetch('http://localhost:5501/api/auth/login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        email: 'admin@event.com',
+                        password: 'admin123'
+                    })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    localStorage.setItem('authToken', data.accessToken);
+                    localStorage.setItem('currentUser', JSON.stringify(data.user));
+                    document.getElementById('result').innerHTML = '<p style="color: green;">Login successful! Token saved. You can now access admin pages.</p>';
+                } else {
+                    document.getElementById('result').innerHTML = '<p style="color: red;">Login failed: ' + data.error + '</p>';
+                }
+            } catch (error) {
+                document.getElementById('result').innerHTML = '<p style="color: red;">Error: ' + error.message + '</p>';
+            }
+        }
+    </script>
+</body>
+</html>

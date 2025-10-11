@@ -55,7 +55,7 @@ Preferred communication style: Simple, everyday language.
 - JWT-based authentication using RS256 (RSA asymmetric encryption)
 - Dual token system: Ticket QR (RS256) and Gate QR (HS256)
 - Role-based access control middleware
-- bcryptjs for password hashing with salt rounds
+- Argon2id for password hashing
 
 **Real-time Communication:**
 - Socket.IO for WebSocket connections
@@ -163,7 +163,7 @@ Preferred communication style: Simple, everyday language.
 
 **Security:**
 - jsonwebtoken - JWT creation and verification
-- bcryptjs - Password hashing
+- argon2 - Password hashing
 
 **Development:**
 - vite - Build tool and dev server

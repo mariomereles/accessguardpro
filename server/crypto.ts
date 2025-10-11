@@ -1,6 +1,7 @@
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
-import bcrypt from "bcryptjs";
+import argon2 from "argon2";
+import QRCode from "qrcode";
 
 // Generate RSA key pair for JWT signing (in production, load from files)
 const { privateKey, publicKey } = crypto.generateKeyPairSync("rsa", {
@@ -125,10 +126,36 @@ export function verifyAuthToken(token: string): AuthPayload {
 
 // Hash password
 export async function hashPassword(password: string): Promise<string> {
-  return bcrypt.hash(password, 10);
+  return argon2.hash(password);
 }
 
 // Verify password
 export async function verifyPassword(password: string, hash: string): Promise<boolean> {
-  return bcrypt.compare(password, hash);
+  return argon2.verify(hash, password);
+}
+
+// Generate QR code as data URL
+export async function generateQRCodeDataURL(text: string): Promise<string> {
+  return QRCode.toDataURL(text, {
+    errorCorrectionLevel: 'M',
+    type: 'image/png',
+    margin: 1,
+    color: {
+      dark: '#000000',
+      light: '#FFFFFF'
+    }
+  });
+}
+
+// Generate QR code as buffer
+export async function generateQRCodeBuffer(text: string): Promise<Buffer> {
+  return QRCode.toBuffer(text, {
+    errorCorrectionLevel: 'M',
+    type: 'png',
+    margin: 1,
+    color: {
+      dark: '#000000',
+      light: '#FFFFFF'
+    }
+  });
 }
