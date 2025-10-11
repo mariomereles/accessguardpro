@@ -1,0 +1,258 @@
+**AI AGENT PROMPT – EVENT ACCESS CONTROL SYSTEM (VariableT)**
+
+---
+
+### Context
+
+Develop a professional, scalable, and secure **Event Access Control System** that uses QR codes for attendee check-in. The system must include:
+
+* A **public registration page** for attendees.
+* A **dashboard** for administrators and staff to monitor, control, and analyze event access in real time.
+* Support for **multiple gates (entry points)** working simultaneously.
+* Two QR modes: **Gate-QR (auto-checkin)** and **Ticket-QR (staff scan)**.
+* Deployment on **CloudPanel + Nginx + PM2**, **without Docker**.
+
+---
+
+### Core Objectives
+
+1. Enable fast, concurrent check-ins across multiple gates.
+2. Prevent duplicates, fraud, and double entries.
+3. Provide real-time metrics and analytics per gate and event.
+4. Maintain security, privacy, and scalability.
+5. Deliver a PWA experience for both users and staff.
+
+---
+
+### System Architecture
+
+**Frontend (PWA)**
+
+* Framework: React 18 + Vite + TypeScript
+* UI: Shadcn/UI or Tailwind CSS
+* State: TanStack Query (React Query)
+* Camera: ZXing-js or BarcodeDetector API
+* Offline support: Workbox for caching and offline queueing
+* Two roles:
+
+  * **User**: registration, view/download personal Ticket-QR, scan Gate-QR to auto-checkin
+  * **Staff/Admin**: live metrics, gate monitoring, attendee validation, exports
+
+**Backend (API)**
+
+* Node.js 20 + Fastify (preferred) or Express
+* TypeScript with Zod for input validation
+* PostgreSQL (preferred) or MySQL for transactional data
+* Redis 7 for locks, caching, and short-term state
+* JWT (RS256) for auth, tokens with 5min lifespan + refresh system
+* Socket.IO or Server-Sent Events (SSE) for real-time metrics
+* PM2 for process management, Nginx as reverse proxy
+
+**Infrastructure (no Docker)**
+
+* CloudPanel server using Nginx (HTTP/2 + SSL)
+* PM2 ecosystem config (cluster mode, log rotation)
+* Redis + PostgreSQL services installed locally or remote
+* Backup and restore scripts
+
+---
+
+### Functional Requirements
+
+#### Public User Flow
+
+* User registers (name, email, doc type/number, phone, etc.)
+* Receives confirmation email with Ticket-QR
+* Can log in and access `/me/ticket` to view or download QR (PDF A6)
+* Can scan Gate-QR (displayed on-screen at gate) to auto-checkin
+
+#### Staff/Admin Flow
+
+* Staff login via credentials (RBAC)
+* Access dashboard `/admin/dashboard`
+* Monitor check-ins per gate in real time
+* Export attendee lists and check-in data (CSV/XLSX)
+* Generate new Gate-QR tokens per gate (rotating every 30–60s)
+* Receive alerts for duplicates or gate errors
+
+---
+
+### Data Model (simplified)
+
+```
+events(id, name, venue, starts_at, ends_at, status)
+gates(id, event_id, name, location, is_active)
+users(id, email, password_hash, role[ADMIN|ORGANIZER|STAFF|USER], status, created_at)
+attendees(id, event_id, user_id, full_name, doc_type, doc_number, email, phone, category)
+tickets(id, attendee_id, code, jti, type[GENERAL|VIP|STAFF], issued_at, revoked_at)
+checkins(id, event_id, attendee_id, gate_id, ts, method[A|B], result[OK|DUP|DENIED], device_id, ip, user_agent)
+metrics_counters(event_id, gate_id, ts_bucket, entered, denied, dup)
+audit_logs(id, actor_user_id, action, entity, entity_id, ts, meta)
+```
+
+---
+
+### API Endpoints
+
+**Auth**
+
+* `POST /auth/register` → create user
+* `POST /auth/login` → returns `{ accessToken, refreshToken }`
+* `POST /auth/refresh` → rotate tokens
+
+**Tickets**
+
+* `POST /events/:eventId/attendees` → register attendee, create Ticket-QR
+* `GET /me/ticket?eventId=` → return signed Ticket-QR JWT + optional PDF
+
+**Check-ins**
+
+* `GET /gates/:gateId/qr` → returns rotating Gate-QR (30–60s TTL)
+* `POST /checkins`
+
+  * Mode A: `{ rotatingToken }`
+  * Mode B: `{ attendeeToken, gateId }`
+* Returns `{ result: OK|DUP|DENIED, attendee, gate, ts }`
+
+**Metrics**
+
+* `GET /events/:id/metrics/summary`
+* `GET /events/:id/metrics/gates`
+* `GET /events/:id/exports/checkins.csv`
+
+**Admin**
+
+* CRUD: events, gates, users
+* `POST /draws` → run random draws (optional feature)
+
+---
+
+### QR Token Rules
+
+**Ticket-QR (personal)**
+
+* JWT RS256
+* Claims: `iss`, `aud`, `sub`(attendeeId), `evt`(eventId), `tkt`(ticketId), `typ":"ticket"`, `jti`, `iat`, `exp(24h)`
+* Invalid if `revoked_at` not null
+
+**Gate-QR (rotating)**
+
+* JWT HS256 or TOTP-HMAC (per gate)
+* Claims: `iss`, `evt`, `gat`, `typ":"gate"`, `nonce`, `iat`, `exp(<=60s)`
+
+---
+
+### Anti-Duplication & Concurrency
+
+* Redis key: `checkin:{eventId}:{attendeeId}:{bucketTs}` with TTL=10s, using SETNX.
+* If key exists → DUP response.
+* Optional: lock per gate `lock:gate:{gateId}` TTL=2s.
+* Configurable anti-passback (single_entry=true or multi-entry window).
+
+---
+
+### Security
+
+* Password hashing: Argon2id
+* JWT access 5min + refresh 7d (rotating)
+* RBAC enforced in middleware
+* HTTPS enforced (HSTS, CSP, Referrer-Policy)
+* PII encrypted with AES-GCM (rotating key)
+* All actions logged in `audit_logs` with chain hash integrity
+
+---
+
+### Real-Time Metrics
+
+Expose real-time data via WebSocket/SSE:
+
+* Entries/minute by gate
+* Latency p50/p95/p99
+* Duplicate/denied count
+* Gate ranking & heatmaps
+* Alerts (e.g. gate inactivity >2min, duplicate spikes)
+
+---
+
+### Deployment (CloudPanel + Nginx + PM2)
+
+**Nginx config:**
+
+* Serve frontend from `/home/.../dist`
+* Proxy `/api` to Node.js on `127.0.0.1:5001`
+* Enable SSL, HTTP/2, gzip, and proper headers (`X-Real-IP`, etc.)
+
+**PM2 config (ecosystem.config.js):**
+
+```
+module.exports = {
+  apps: [{
+    name: 'event-api',
+    script: 'dist/index.js',
+    instances: 'max',
+    exec_mode: 'cluster',
+    env: {
+      NODE_ENV: 'production',
+      PORT: 5001
+    }
+  }]
+}
+```
+
+**.env.example:**
+
+```
+NODE_ENV=production
+PORT=5001
+DATABASE_URL=postgres://user:pass@host:5432/db
+REDIS_URL=redis://127.0.0.1:6379
+JWT_PRIVATE_KEY_PATH=./keys/private.pem
+JWT_PUBLIC_KEY_PATH=./keys/public.pem
+GATE_HS_SECRET_DEFAULT=change_me
+HASH_CHAIN_SALT=change_me
+CORS_ORIGIN=https://yourdomain.com
+```
+
+---
+
+### Testing & Performance
+
+* Unit tests (Zod validators, auth, checkins)
+* Integration tests (auth→checkin flow)
+* k6 load test: target p95 <200ms, <0.5% error rate, 4 gates × 25 checkins/s
+
+---
+
+### Optional Enhancements
+
+* Zone-based capacity limits & ticket-type access rules
+* Wallet passes (Apple/Google)
+* Kiosk mode (self-registration + thermal print)
+* Forecast (ARIMA/Prophet) for entry peaks
+* Anomaly detection on duplicate patterns
+* Staff performance tracking (per gate throughput)
+
+---
+
+### Deliverables
+
+1. **Backend:** Complete TypeScript code, Prisma schema, migrations, seed data.
+2. **Frontend:** PWA with full UI and state management.
+3. **Infrastructure:** Nginx config, PM2 config, .env.example, backup scripts.
+4. **Docs:** README (setup + deploy), OpenAPI spec, ER diagram, RBAC matrix, backup & security policies.
+
+---
+
+### Acceptance Criteria
+
+* Functional registration & Ticket-QR generation
+* Gate-QR rotation per gate every 30–60s
+* Both QR modes fully operational (auto-checkin & staff scan)
+* Anti-duplicate + anti-passback enforcement (Redis)
+* Metrics dashboard real-time & exportable
+* PM2 + Nginx deployment running without Docker
+
+---
+
+**Instruction to AI Agent:**
+Generate the entire system architecture and code according to these specifications. Provide full implementation (frontend + backend + infra) following clean, maintainable, production-grade standards.
