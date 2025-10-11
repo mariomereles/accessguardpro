@@ -4,14 +4,48 @@ import { RegistrationForm } from "@/components/RegistrationForm";
 import { Button } from "@/components/ui/button";
 import { ArrowLeft } from "lucide-react";
 import { Link } from "wouter";
+import { api } from "@/lib/api";
+import { useToast } from "@/hooks/use-toast";
+
+// Default event ID from seed
+const DEFAULT_EVENT_ID = "cf0bd3b2-7f74-4c85-a0f5-f80940cadc39";
 
 export default function Register() {
   const [, setLocation] = useLocation();
+  const { toast } = useToast();
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const handleSubmit = (data: any) => {
-    console.log("Registration data:", data);
-    // TODO: Remove mock functionality - submit to backend
-    setLocation("/me/ticket");
+  const handleSubmit = async (data: any) => {
+    setIsSubmitting(true);
+    try {
+      const result = await api.registerForEvent(DEFAULT_EVENT_ID, {
+        fullName: data.fullName,
+        email: data.email,
+        phone: data.phone,
+        docType: data.docType,
+        docNumber: data.docNumber,
+        ticketType: data.ticketType.toUpperCase(),
+        eventId: DEFAULT_EVENT_ID,
+      });
+
+      toast({
+        title: "Registration Successful!",
+        description: "Your ticket has been generated. Check your email for details.",
+      });
+
+      // Store ticket data for the ticket page
+      localStorage.setItem("lastTicket", JSON.stringify(result));
+      
+      setLocation(`/me/ticket?eventId=${DEFAULT_EVENT_ID}`);
+    } catch (error: any) {
+      toast({
+        title: "Registration Failed",
+        description: error.message || "Please try again",
+        variant: "destructive",
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (

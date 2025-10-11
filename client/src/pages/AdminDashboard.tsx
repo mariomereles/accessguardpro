@@ -1,28 +1,78 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { MetricCard } from "@/components/MetricCard";
 import { GateStatusCard } from "@/components/GateStatusCard";
 import { LiveActivityFeed } from "@/components/LiveActivityFeed";
 import { ChartContainer } from "@/components/ChartContainer";
 import { Users, Activity, AlertTriangle, DoorOpen } from "lucide-react";
+import { api } from "@/lib/api";
+import { subscribeToEvent } from "@/lib/websocket";
+import { useToast } from "@/hooks/use-toast";
+
+// Default event ID from seed
+const DEFAULT_EVENT_ID = "cf0bd3b2-7f74-4c85-a0f5-f80940cadc39";
 
 export default function AdminDashboard() {
-  // TODO: Remove mock functionality - fetch from backend
-  const [gates, setGates] = useState([
-    { id: "1", name: "Main Entrance", location: "Building A - Ground Floor", isActive: true, checkins: 342, lastCheckin: "2 min ago" },
-    { id: "2", name: "VIP Gate", location: "Building A - 2nd Floor", isActive: true, checkins: 87, lastCheckin: "5 min ago" },
-    { id: "3", name: "East Entry", location: "Building B - Ground Floor", isActive: true, checkins: 156, lastCheckin: "1 min ago" },
-    { id: "4", name: "West Entry", location: "Building B - Ground Floor", isActive: false, checkins: 0 },
-  ]);
+  const { toast } = useToast();
+  const [recentCheckins, setRecentCheckins] = useState<any[]>([]);
 
-  const mockActivities = [
-    { id: "1", attendeeName: "Sarah Johnson", gate: "Main Entrance", result: "OK" as const, timestamp: "14:32:45" },
-    { id: "2", attendeeName: "Michael Chen", gate: "VIP Gate", result: "OK" as const, timestamp: "14:32:42" },
-    { id: "3", attendeeName: "Emma Wilson", gate: "Main Entrance", result: "DUP" as const, timestamp: "14:32:38" },
-    { id: "4", attendeeName: "David Martinez", gate: "East Entry", result: "OK" as const, timestamp: "14:32:35" },
-    { id: "5", attendeeName: "Lisa Anderson", gate: "Main Entrance", result: "DENIED" as const, timestamp: "14:32:30" },
-    { id: "6", attendeeName: "James Taylor", gate: "VIP Gate", result: "OK" as const, timestamp: "14:32:28" },
-  ];
+  const { data: metrics, refetch: refetchMetrics } = useQuery({
+    queryKey: ["/api/events", DEFAULT_EVENT_ID, "metrics"],
+    queryFn: () => api.getEventMetrics(DEFAULT_EVENT_ID),
+  });
 
+  const { data: gateMetrics, refetch: refetchGates } = useQuery({
+    queryKey: ["/api/events", DEFAULT_EVENT_ID, "gates", "metrics"],
+    queryFn: () => api.getGateMetrics(DEFAULT_EVENT_ID),
+  });
+
+  const { data: checkins, refetch: refetchCheckins } = useQuery({
+    queryKey: ["/api/events", DEFAULT_EVENT_ID, "checkins"],
+    queryFn: () => api.getRecentCheckins(DEFAULT_EVENT_ID, 50),
+  });
+
+  useEffect(() => {
+    if (checkins) {
+      setRecentCheckins(checkins.map((c: any) => ({
+        id: c.id,
+        attendeeName: c.attendee?.fullName || "Unknown",
+        gate: c.gate?.name || "Unknown Gate",
+        result: c.result,
+        timestamp: new Date(c.timestamp).toLocaleTimeString(),
+      })));
+    }
+  }, [checkins]);
+
+  useEffect(() => {
+    const unsubscribe = subscribeToEvent(DEFAULT_EVENT_ID, (data) => {
+      if (data.type === "checkin") {
+        refetchMetrics();
+        refetchGates();
+        refetchCheckins();
+      }
+    });
+
+    return () => unsubscribe();
+  }, [refetchMetrics, refetchGates, refetchCheckins]);
+
+  const handleToggleGate = async (gateId: string, currentStatus: boolean) => {
+    try {
+      await api.toggleGateStatus(gateId, !currentStatus);
+      refetchGates();
+      toast({
+        title: "Gate Updated",
+        description: `Gate ${!currentStatus ? 'enabled' : 'disabled'} successfully`,
+      });
+    } catch (error: any) {
+      toast({
+        title: "Error",
+        description: error.message,
+        variant: "destructive",
+      });
+    }
+  };
+
+  // Mock chart data - would come from time-series metrics in real app
   const chartData = [
     { time: "14:00", mainEntrance: 24, vipGate: 8, eastEntry: 12 },
     { time: "14:15", mainEntrance: 32, vipGate: 12, eastEntry: 15 },
@@ -37,13 +87,6 @@ export default function AdminDashboard() {
     { dataKey: "eastEntry", name: "East Entry", color: "hsl(var(--chart-3))" },
   ];
 
-  const handleToggleGate = (id: string) => {
-    setGates(gates.map(gate => 
-      gate.id === id ? { ...gate, isActive: !gate.isActive } : gate
-    ));
-    console.log("Toggle gate:", id);
-  };
-
   return (
     <div className="space-y-8">
       <div>
@@ -55,28 +98,24 @@ export default function AdminDashboard() {
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <MetricCard
           title="Total Entries"
-          value="1,247"
+          value={metrics?.totalCheckins || 0}
           icon={Users}
-          trend={{ value: 12.5, isPositive: true }}
-          description="Last 24 hours"
+          description="All time"
         />
         <MetricCard
-          title="Current Rate"
-          value="24/min"
+          title="Today"
+          value={metrics?.todayCheckins || 0}
           icon={Activity}
-          trend={{ value: 8.2, isPositive: true }}
         />
         <MetricCard
           title="Duplicates"
-          value="3"
+          value={metrics?.duplicates || 0}
           icon={AlertTriangle}
-          trend={{ value: 2.1, isPositive: false }}
         />
         <MetricCard
           title="Active Gates"
-          value="3"
+          value={gateMetrics?.filter((g: any) => g.isActive).length || 0}
           icon={DoorOpen}
-          description="1 inactive"
         />
       </div>
 
@@ -92,22 +131,22 @@ export default function AdminDashboard() {
         <div className="space-y-6">
           <h2 className="text-xl font-semibold">Gate Status</h2>
           <div className="space-y-4">
-            {gates.map((gate) => (
+            {gateMetrics?.map((gate: any) => (
               <GateStatusCard
                 key={gate.id}
                 name={gate.name}
                 location={gate.location}
                 isActive={gate.isActive}
                 checkins={gate.checkins}
-                lastCheckin={gate.lastCheckin}
-                onToggle={() => handleToggleGate(gate.id)}
+                lastCheckin={gate.lastCheckin ? new Date(gate.lastCheckin).toLocaleString() : undefined}
+                onToggle={() => handleToggleGate(gate.id, gate.isActive)}
                 onViewQR={() => console.log("View QR for", gate.id)}
               />
             ))}
           </div>
         </div>
 
-        <LiveActivityFeed activities={mockActivities} />
+        <LiveActivityFeed activities={recentCheckins} />
       </div>
     </div>
   );

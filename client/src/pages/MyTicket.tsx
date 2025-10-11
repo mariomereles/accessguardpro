@@ -1,28 +1,58 @@
+import { useEffect, useState } from "react";
+import { useLocation } from "wouter";
 import { TicketCard } from "@/components/TicketCard";
 import { Button } from "@/components/ui/button";
 import { ArrowLeft } from "lucide-react";
 import { Link } from "wouter";
 
 export default function MyTicket() {
-  // TODO: Remove mock functionality - fetch from backend
-  const ticketData = {
-    attendeeName: "Sarah Johnson",
-    eventName: "Tech Summit 2025",
-    ticketType: "VIP Access",
-    ticketCode: "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJldmVudC1zeXN0ZW0iLCJzdWIiOiIxMjM0NTY3ODkwIiwiZXZ0IjoiZXZ0LTEyMyIsInRrdCI6InRrdC00NTYiLCJ0eXAiOiJ0aWNrZXQifQ",
-    venue: "Convention Center, Hall A",
-    date: "March 15, 2025 • 9:00 AM",
-  };
+  const [location] = useLocation();
+  const [ticketData, setTicketData] = useState<any>(null);
+
+  useEffect(() => {
+    // Get ticket from localStorage (set during registration)
+    const stored = localStorage.getItem("lastTicket");
+    if (stored) {
+      const data = JSON.parse(stored);
+      setTicketData({
+        attendeeName: data.attendee.fullName,
+        eventName: "Tech Summit 2025",
+        ticketType: data.attendee.ticketType,
+        ticketCode: data.ticket.qrCode,
+        venue: "Convention Center, Hall A",
+        date: "March 15, 2025 • 9:00 AM",
+      });
+    }
+  }, [location]);
 
   const handleDownload = () => {
     console.log("Download PDF");
-    // TODO: Remove mock functionality - generate PDF
+    alert("PDF download functionality would be implemented here");
   };
 
   const handleShare = () => {
     console.log("Share ticket");
-    // TODO: Remove mock functionality - implement share
+    if (navigator.share) {
+      navigator.share({
+        title: "Event Ticket",
+        text: "Check out my event ticket!",
+      });
+    }
   };
+
+  if (!ticketData) {
+    return (
+      <div className="min-h-screen bg-background py-12 px-6 flex items-center justify-center">
+        <div className="text-center">
+          <h2 className="text-2xl font-bold mb-4">No Ticket Found</h2>
+          <p className="text-muted-foreground mb-6">Please register for an event first.</p>
+          <Button asChild>
+            <Link href="/register">Register Now</Link>
+          </Button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-background py-12 px-6">

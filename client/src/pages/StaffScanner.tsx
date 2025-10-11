@@ -11,33 +11,65 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "@/lib/api";
+import { useToast } from "@/hooks/use-toast";
+
+// Default event ID from seed
+const DEFAULT_EVENT_ID = "cf0bd3b2-7f74-4c85-a0f5-f80940cadc39";
 
 export default function StaffScanner() {
+  const { toast } = useToast();
   const [showScanner, setShowScanner] = useState(false);
   const [showSuccess, setShowSuccess] = useState(false);
-  const [selectedGate, setSelectedGate] = useState("main-entrance");
+  const [selectedGate, setSelectedGate] = useState("");
   const [lastCheckin, setLastCheckin] = useState<any>(null);
 
-  // TODO: Remove mock functionality - fetch gates from backend
-  const gates = [
-    { id: "main-entrance", name: "Main Entrance" },
-    { id: "vip-gate", name: "VIP Gate" },
-    { id: "east-entry", name: "East Entry" },
-  ];
+  const { data: gates } = useQuery({
+    queryKey: ["/api/events", DEFAULT_EVENT_ID, "gates"],
+    queryFn: () => api.getEventGates(DEFAULT_EVENT_ID),
+  });
 
-  const handleScan = (data: string) => {
-    console.log("Scanned:", data);
-    // TODO: Remove mock functionality - validate and check-in via backend
-    
-    const mockCheckin = {
-      attendeeName: "Sarah Johnson",
-      gate: gates.find(g => g.id === selectedGate)?.name || "Main Entrance",
-      timestamp: new Date().toLocaleTimeString(),
-    };
-    
-    setLastCheckin(mockCheckin);
-    setShowScanner(false);
-    setShowSuccess(true);
+  const handleScan = async (data: string) => {
+    if (!selectedGate) {
+      toast({
+        title: "Error",
+        description: "Please select a gate first",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    try {
+      const result = await api.checkin("staff", {
+        ticketQR: data,
+        gateId: selectedGate,
+      });
+
+      setShowScanner(false);
+
+      if (result.result === "OK") {
+        setLastCheckin({
+          attendeeName: result.attendee?.fullName || "Unknown",
+          gate: result.gate?.name || "Unknown",
+          timestamp: new Date(result.timestamp).toLocaleTimeString(),
+        });
+        setShowSuccess(true);
+      } else {
+        toast({
+          title: "Check-in Failed",
+          description: result.reason || "Unable to check-in",
+          variant: "destructive",
+        });
+      }
+    } catch (error: any) {
+      toast({
+        title: "Error",
+        description: error.message || "Check-in failed",
+        variant: "destructive",
+      });
+      setShowScanner(false);
+    }
   };
 
   return (
@@ -54,10 +86,10 @@ export default function StaffScanner() {
               <label className="text-sm font-medium mb-2 block">Select Gate</label>
               <Select value={selectedGate} onValueChange={setSelectedGate}>
                 <SelectTrigger data-testid="select-gate">
-                  <SelectValue />
+                  <SelectValue placeholder="Choose a gate" />
                 </SelectTrigger>
                 <SelectContent>
-                  {gates.map((gate) => (
+                  {gates?.filter((g: any) => g.isActive).map((gate: any) => (
                     <SelectItem key={gate.id} value={gate.id}>
                       {gate.name}
                     </SelectItem>
@@ -69,6 +101,7 @@ export default function StaffScanner() {
             <Button
               className="w-full h-16 text-lg"
               onClick={() => setShowScanner(true)}
+              disabled={!selectedGate}
               data-testid="button-start-scan"
             >
               <ScanLine className="h-6 w-6 mr-2" />
