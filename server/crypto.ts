@@ -4,17 +4,37 @@ import argon2 from "argon2";
 import QRCode from "qrcode";
 
 // RSA key pair for JWT signing. Set JWT_PRIVATE_KEY / JWT_PUBLIC_KEY (PEM, "\\n" allowed)
-// so tokens survive restarts; otherwise a temporary pair is generated at startup.
-const envKey = (name: string) => process.env[name]?.replace(/\\n/g, "\n");
-const generated = !process.env.JWT_PRIVATE_KEY || !process.env.JWT_PUBLIC_KEY
-  ? crypto.generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      publicKeyEncoding: { type: "spki", format: "pem" },
-      privateKeyEncoding: { type: "pkcs8", format: "pem" },
-    })
-  : null;
-const privateKey = generated ? generated.privateKey : envKey("JWT_PRIVATE_KEY")!;
-const publicKey = generated ? generated.publicKey : envKey("JWT_PUBLIC_KEY")!;
+// so tokens survive restarts. If they are missing or malformed, a temporary pair is
+// generated at startup (tokens then stop being valid after each restart).
+const normalizePem = (value?: string) =>
+  value
+    ?.trim()
+    .replace(/^["']|["']$/g, "")
+    .replace(/\\n/g, "\n")
+    .trim();
+
+function loadKeys(): { privateKey: string; publicKey: string } {
+  const priv = normalizePem(process.env.JWT_PRIVATE_KEY);
+  const pub = normalizePem(process.env.JWT_PUBLIC_KEY);
+  if (priv && pub) {
+    try {
+      crypto.createPrivateKey(priv);
+      crypto.createPublicKey(pub);
+      return { privateKey: priv, publicKey: pub };
+    } catch (err: any) {
+      console.error("[crypto] JWT_PRIVATE_KEY/JWT_PUBLIC_KEY are not valid PEM keys, using a temporary pair:", err.message);
+    }
+  } else {
+    console.warn("[crypto] JWT keys not configured, using a temporary pair");
+  }
+  return crypto.generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: "spki", format: "pem" },
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+  });
+}
+
+const { privateKey, publicKey } = loadKeys();
 
 // HS256 secret for gate QR codes
 const GATE_SECRET = process.env.GATE_HS_SECRET_DEFAULT || "change_me_in_production";
