@@ -1,5 +1,5 @@
 // Prefer explicit Vite environment variable VITE_API_BASE, fallback to localhost:5501
-const API_BASE = (import.meta as any).env?.VITE_API_BASE || "http://localhost:5501/api";
+const API_BASE = (import.meta as any).env?.VITE_API_BASE || ((import.meta as any).env?.PROD ? "/api" : "http://localhost:5501/api");
 
 let authToken: string | null = localStorage.getItem("authToken");
 let currentUser: any = null;

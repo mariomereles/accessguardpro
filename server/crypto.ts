@@ -3,12 +3,18 @@ import crypto from "crypto";
 import argon2 from "argon2";
 import QRCode from "qrcode";
 
-// Generate RSA key pair for JWT signing (in production, load from files)
-const { privateKey, publicKey } = crypto.generateKeyPairSync("rsa", {
-  modulusLength: 2048,
-  publicKeyEncoding: { type: "spki", format: "pem" },
-  privateKeyEncoding: { type: "pkcs8", format: "pem" },
-});
+// RSA key pair for JWT signing. Set JWT_PRIVATE_KEY / JWT_PUBLIC_KEY (PEM, "\\n" allowed)
+// so tokens survive restarts; otherwise a temporary pair is generated at startup.
+const envKey = (name: string) => process.env[name]?.replace(/\\n/g, "\n");
+const generated = !process.env.JWT_PRIVATE_KEY || !process.env.JWT_PUBLIC_KEY
+  ? crypto.generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    })
+  : null;
+const privateKey = generated ? generated.privateKey : envKey("JWT_PRIVATE_KEY")!;
+const publicKey = generated ? generated.publicKey : envKey("JWT_PUBLIC_KEY")!;
 
 // HS256 secret for gate QR codes
 const GATE_SECRET = process.env.GATE_HS_SECRET_DEFAULT || "change_me_in_production";

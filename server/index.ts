@@ -9,6 +9,10 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
+app.get("/health", (_req, res) => {
+  res.json({ status: "ok" });
+});
+
 app.use((req, res, next) => {
   const start = Date.now();
   const path = req.path;
@@ -63,7 +67,7 @@ app.use((req, res, next) => {
   const port = parseInt(process.env.PORT || '5501', 10);
   server.listen({
     port,
-    host: "localhost",
+    host: process.env.HOST || (process.env.NODE_ENV === "production" ? "0.0.0.0" : "localhost"),
   }, () => {
     log(`serving on port ${port}`);
   });

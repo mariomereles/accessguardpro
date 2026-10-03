@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: accessguard-pro
+    runtime: node
+    plan: free
+    buildCommand: npm ci --include=dev && npm run build && npm run db:push -- --force
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: GATE_HS_SECRET_DEFAULT
+        generateValue: true
+      - key: JWT_PRIVATE_KEY
+        sync: false
+      - key: JWT_PUBLIC_KEY
+        sync: false
