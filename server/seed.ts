@@ -1,83 +1,64 @@
 import "dotenv/config";
+import crypto from "crypto";
 import { storage } from "./storage";
 import { hashPassword } from "./crypto";
 import { db } from "./db";
 import { users } from "@shared/schema";
 import { eq } from "drizzle-orm";
 
+// Idempotent and non-destructive: safe to run more than once, never deletes existing data.
+// Passwords come from SEED_ADMIN_PASSWORD / SEED_STAFF_PASSWORD; if unset, a random one is
+// generated and printed once (there are no well-known default credentials).
+async function ensureUser(email: string, role: "ADMIN" | "STAFF", envVar: string) {
+  const [existing] = await db.select().from(users).where(eq(users.email, email)).limit(1);
+  if (existing) {
+    console.log(`User exists, left untouched: ${email}`);
+    return null;
+  }
+  const password = process.env[envVar] || crypto.randomBytes(12).toString("base64url");
+  const generated = !process.env[envVar];
+  await storage.createUser({ email, passwordHash: await hashPassword(password), role, status: "ACTIVE" });
+  console.log(`Created ${role}: ${email}${generated ? `  password: ${password}   (shown once, change it after first login)` : ""}`);
+  return password;
+}
+
 async function seed() {
   console.log("Seeding database...");
 
-  // Delete existing users to recreate with Argon2
-  await db.delete(users).where(eq(users.email, "admin@event.com"));
-  await db.delete(users).where(eq(users.email, "staff@event.com"));
-  console.log("Deleted existing users");
+  await ensureUser(process.env.SEED_ADMIN_EMAIL || "admin@event.com", "ADMIN", "SEED_ADMIN_PASSWORD");
+  await ensureUser(process.env.SEED_STAFF_EMAIL || "staff@event.com", "STAFF", "SEED_STAFF_PASSWORD");
 
-  // Create admin user
-  const adminPassword = await hashPassword("admin123");
-  const admin = await storage.createUser({
-    email: "admin@event.com",
-    passwordHash: adminPassword,
-    role: "ADMIN",
-    status: "ACTIVE",
-  });
-  console.log("Created admin user:", admin.email);
+  const existingEvents = await storage.getAllEvents();
+  if (existingEvents.length > 0) {
+    console.log(`Events already present (${existingEvents.length}); skipping sample event and gates.`);
+    process.exit(0);
+  }
 
-  // Create staff user
-  const staffPassword = await hashPassword("staff123");
-  const staff = await storage.createUser({
-    email: "staff@event.com",
-    passwordHash: staffPassword,
-    role: "STAFF",
-    status: "ACTIVE",
-  });
-  console.log("Created staff user:", staff.email);
+  const starts = new Date();
+  starts.setDate(starts.getDate() + 14);
+  starts.setHours(9, 0, 0, 0);
+  const ends = new Date(starts);
+  ends.setHours(18, 0, 0, 0);
 
-  // Create event
   const event = await storage.createEvent({
-    name: "Tech Summit 2025",
+    name: "Tech Summit",
     venue: "Convention Center, Hall A",
-    startsAt: new Date("2025-03-15T09:00:00"),
-    endsAt: new Date("2025-03-15T18:00:00"),
+    startsAt: starts,
+    endsAt: ends,
     status: "ACTIVE",
   });
-  console.log("Created event:", event.name);
+  console.log("Created event:", event.name, event.id);
 
-  // Create gates
-  const gates = await Promise.all([
-    storage.createGate({
-      eventId: event.id,
-      name: "Main Entrance",
-      location: "Building A - Ground Floor",
-      isActive: true,
-    }),
-    storage.createGate({
-      eventId: event.id,
-      name: "VIP Gate",
-      location: "Building A - 2nd Floor",
-      isActive: true,
-    }),
-    storage.createGate({
-      eventId: event.id,
-      name: "East Entry",
-      location: "Building B - Ground Floor",
-      isActive: true,
-    }),
-    storage.createGate({
-      eventId: event.id,
-      name: "West Entry",
-      location: "Building B - Ground Floor",
-      isActive: false,
-    }),
-  ]);
-  console.log("Created gates:", gates.length);
-
-  console.log("\nSeed completed successfully!");
-  console.log("\nLogin credentials:");
-  console.log("Admin: admin@event.com / admin123");
-  console.log("Staff: staff@event.com / staff123");
-  console.log("\nEvent ID:", event.id);
-
+  for (const g of [
+    { name: "Main Entrance", location: "Building A - Ground Floor", isActive: true },
+    { name: "VIP Gate", location: "Building A - 2nd Floor", isActive: true },
+    { name: "East Entry", location: "Building B - Ground Floor", isActive: true },
+    { name: "West Entry", location: "Building B - Ground Floor", isActive: false },
+  ]) {
+    await storage.createGate({ eventId: event.id, ...g });
+  }
+  console.log("Created 4 gates");
+  console.log("\nSeed completed.");
   process.exit(0);
 }
 

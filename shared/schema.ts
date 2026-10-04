@@ -43,7 +43,7 @@ export const gates = pgTable("gates", {
   capacityType: gateCapacityTypeEnum("capacity_type").notNull().default("unlimited"),
   capacity: integer("capacity"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
-});
+}, (t) => [index("gates_event_idx").on(t.eventId)]);
 
 // Attendees table
 export const attendees = pgTable("attendees", {
@@ -57,7 +57,11 @@ export const attendees = pgTable("attendees", {
   docNumber: text("doc_number").notNull(),
   ticketType: ticketTypeEnum("ticket_type").notNull().default("GENERAL"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
-});
+}, (t) => [
+  // One registration per email per event (emails are stored lowercase)
+  uniqueIndex("attendees_event_email_unique").on(t.eventId, t.email),
+  index("attendees_user_idx").on(t.userId),
+]);
 
 // Tickets table
 export const tickets = pgTable("tickets", {
@@ -67,7 +71,7 @@ export const tickets = pgTable("tickets", {
   jti: text("jti").notNull().unique(),
   issuedAt: timestamp("issued_at").notNull().defaultNow(),
   revokedAt: timestamp("revoked_at"),
-});
+}, (t) => [index("tickets_attendee_idx").on(t.attendeeId)]);
 
 // Check-ins table
 export const checkins = pgTable("checkins", {

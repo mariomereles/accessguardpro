@@ -66,6 +66,17 @@ function csvCell(value: unknown): string {
 
 const normalizeEmail = (e: string) => e.trim().toLowerCase();
 
+// Returns the verified access token payload if one was sent, otherwise null (never throws)
+function optionalUser(req: Request) {
+  const h = req.headers.authorization;
+  if (!h?.startsWith("Bearer ")) return null;
+  try {
+    return verifyAuthToken(h.substring(7));
+  } catch {
+    return null;
+  }
+}
+
 const credentialsSchema = z.object({
   email: z.string().trim().email().max(254),
   password: z.string().min(8, "Password must be at least 8 characters").max(128),
@@ -241,25 +252,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: "Already registered for this event" });
       }
 
-      // ticketType is never taken from the client: public registration is always GENERAL
-      const attendee = await storage.createAttendee({
-        ...data,
-        email,
-        eventId,
-        ticketType: "GENERAL",
-      });
-
-      // Generate ticket
+      // ticketType is never taken from the client: public registration is always GENERAL.
+      // If the registrant is logged in, the attendee is bound to that account.
       const jti = nanoid();
-      const code = generateTicketQR(attendee.id, eventId, attendee.id, jti);
-      
-      const ticket = await storage.createTicket({
-        attendeeId: attendee.id,
-        code,
-        jti,
-      });
+      let code = "";
+      const { attendee, ticket } = await storage.registerAttendee(
+        { ...data, email, eventId, ticketType: "GENERAL", userId: optionalUser(req)?.sub ?? null } as any,
+        (attendeeId) => {
+          code = generateTicketQR(attendeeId, eventId, attendeeId, jti);
+          return { code, jti };
+        }
+      );
 
       res.json({ attendee, ticket: { ...ticket, qrCode: code } });
+    } catch (error: any) {
+      if (error?.code === "23505") {
+        return res.status(400).json({ error: "Already registered for this event" });
+      }
+      handleError(res, error);
+    }
+  });
+
+  // Active events (public: id, name, venue and dates only)
+  app.get("/api/events/active", async (_req: Request, res: Response) => {
+    try {
+      const list = await storage.getActiveEvents();
+      res.json(list.map((e) => ({ id: e.id, name: e.name, venue: e.venue, startsAt: e.startsAt, endsAt: e.endsAt })));
     } catch (error) {
       handleError(res, error);
     }
@@ -272,8 +290,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         .object({ eventId: z.string().max(64), format: z.string().max(10).optional() })
         .parse(req.query);
 
+      // Only the account the ticket was issued to can read it: matching by (unverified) email
+      // alone would let anyone claim a victim's ticket by signing up with their address.
       const attendee = await storage.getAttendeeByEmailAndEvent(normalizeEmail(req.user!.email), eventId);
-      if (!attendee) {
+      if (!attendee || attendee.userId !== req.user!.sub) {
         return res.status(404).json({ error: "Ticket not found" });
       }
 
@@ -450,7 +470,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       // In gate mode the logged-in user must be the ticket holder
-      if (body.mode === "gate" && attendee.userId !== user.sub && normalizeEmail(attendee.email) !== normalizeEmail(user.email)) {
+      if (body.mode === "gate" && attendee.userId !== user.sub) {
         return deny("Ticket does not belong to this account", ctx);
       }
 

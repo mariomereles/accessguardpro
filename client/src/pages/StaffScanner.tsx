@@ -15,19 +15,21 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 
-// Default event ID from seed
-const DEFAULT_EVENT_ID = "cf0bd3b2-7f74-4c85-a0f5-f80940cadc39";
+import { useActiveEvent } from "@/hooks/useActiveEvent";
 
 export default function StaffScanner() {
   const { toast } = useToast();
+  const { event } = useActiveEvent();
+  const eventId = event?.id ?? "";
   const [showScanner, setShowScanner] = useState(false);
   const [showSuccess, setShowSuccess] = useState(false);
   const [selectedGate, setSelectedGate] = useState("");
   const [lastCheckin, setLastCheckin] = useState<any>(null);
 
   const { data: gates } = useQuery({
-    queryKey: ["/api/events", DEFAULT_EVENT_ID, "gates"],
-    queryFn: () => api.getEventGates(DEFAULT_EVENT_ID),
+    queryKey: ["/api/events", eventId, "gates"],
+    queryFn: () => api.getEventGates(eventId),
+    enabled: !!eventId,
   });
 
   const handleScan = async (data: string) => {

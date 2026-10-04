@@ -174,6 +174,10 @@ export const api = {
   },
 
   // Events
+  getActiveEvents: async () => {
+    return fetchAPI("/events/active");
+  },
+
   getAllEvents: async () => {
     return fetchAPI("/events");
   },

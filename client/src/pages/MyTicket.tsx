@@ -16,11 +16,11 @@ export default function MyTicket() {
       const data = JSON.parse(stored);
       setTicketData({
         attendeeName: data.attendee.fullName,
-        eventName: "Tech Summit 2025",
+        eventName: data.event?.name ?? "Event",
         ticketType: data.attendee.ticketType,
         ticketCode: data.ticket.qrCode,
-        venue: "Convention Center, Hall A",
-        date: "March 15, 2025 • 9:00 AM",
+        venue: data.event?.venue ?? "",
+        date: data.event?.startsAt ? new Date(data.event.startsAt).toLocaleString() : "",
       });
     }
   }, [location]);

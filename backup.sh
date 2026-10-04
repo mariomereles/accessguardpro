@@ -2,40 +2,44 @@
 
 # Backup script for Event Access Control System
 # Run daily via cron: 0 2 * * * /path/to/backup.sh
+# Optional: set BACKUP_GPG_RECIPIENT to encrypt the dump with that GPG key.
 
-set -e
+set -euo pipefail
+umask 077   # backups contain personal data: owner-only permissions
 
-BACKUP_DIR="/home/youruser/backups"
+: "${DATABASE_URL:?DATABASE_URL must be set}"
+
+BACKUP_DIR="${BACKUP_DIR:-/home/youruser/backups}"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 BACKUP_NAME="event_access_backup_$TIMESTAMP"
+OUT="$BACKUP_DIR/${BACKUP_NAME}.sql.gz"
 
-# Create backup directory
 mkdir -p "$BACKUP_DIR"
+chmod 700 "$BACKUP_DIR"
+
+# Never leave a partial dump behind if something fails
+trap 'rm -f "$OUT" "$OUT.gpg"' ERR
 
 echo "Starting backup: $BACKUP_NAME"
+pg_dump --no-owner "$DATABASE_URL" | gzip > "$OUT"
 
-# Database backup (PostgreSQL)
-echo "Backing up database..."
-pg_dump "$DATABASE_URL" > "$BACKUP_DIR/${BACKUP_NAME}_db.sql"
+if [ -n "${BACKUP_GPG_RECIPIENT:-}" ]; then
+  gpg --batch --yes --encrypt --recipient "$BACKUP_GPG_RECIPIENT" --output "$OUT.gpg" "$OUT"
+  rm -f "$OUT"
+  OUT="$OUT.gpg"
+fi
 
-# Compress backup
-echo "Compressing backup..."
-tar -czf "$BACKUP_DIR/${BACKUP_NAME}.tar.gz" -C "$BACKUP_DIR" "${BACKUP_NAME}_db.sql"
+# A backup that cannot be read back is not a backup
+if [ ! -s "$OUT" ]; then
+  echo "Backup is empty" >&2
+  exit 1
+fi
 
-# Remove uncompressed file
-rm "$BACKUP_DIR/${BACKUP_NAME}_db.sql"
+echo "Cleaning backups older than 7 days..."
+find "$BACKUP_DIR" -name "event_access_backup_*" -mtime +7 -delete
 
-# Keep only last 7 days of backups
-echo "Cleaning old backups..."
-find "$BACKUP_DIR" -name "event_access_backup_*.tar.gz" -mtime +7 -delete
+# Optional: upload to cloud storage (uncomment and configure)
+# aws s3 cp "$OUT" s3://your-backup-bucket/
+# rclone copy "$OUT" remote:backups/
 
-# Optional: Upload to cloud storage (uncomment and configure)
-# aws s3 cp "$BACKUP_DIR/${BACKUP_NAME}.tar.gz" s3://your-backup-bucket/
-# rclone copy "$BACKUP_DIR/${BACKUP_NAME}.tar.gz" remote:backups/
-
-echo "Backup completed: $BACKUP_DIR/${BACKUP_NAME}.tar.gz"
-
-# Send notification (optional)
-# curl -X POST -H 'Content-type: application/json' \
-#   --data '{"text":"Database backup completed"}' \
-#   YOUR_SLACK_WEBHOOK_URL
+echo "Backup completed: $OUT"

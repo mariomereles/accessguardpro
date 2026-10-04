@@ -98,6 +98,10 @@ export class DatabaseStorage implements IStorage {
     return event;
   }
 
+  async getActiveEvents(): Promise<Event[]> {
+    return db.select().from(events).where(eq(events.status, "ACTIVE")).orderBy(events.startsAt);
+  }
+
   async getAllEvents(): Promise<Event[]> {
     return db.select().from(events).orderBy(desc(events.createdAt));
   }
@@ -151,6 +155,21 @@ export class DatabaseStorage implements IStorage {
       .where(and(eq(attendees.email, email), eq(attendees.eventId, eventId)))
       .limit(1);
     return attendee;
+  }
+
+  // Attendee and ticket are created atomically: no orphan attendees if ticket creation fails
+  async registerAttendee(
+    attendee: InsertAttendee,
+    makeTicket: (attendeeId: string) => { code: string; jti: string }
+  ): Promise<{ attendee: Attendee; ticket: Ticket }> {
+    return db.transaction(async (tx) => {
+      const [newAttendee] = await tx.insert(attendees).values(attendee).returning();
+      const [newTicket] = await tx
+        .insert(tickets)
+        .values({ attendeeId: newAttendee.id, ...makeTicket(newAttendee.id) })
+        .returning();
+      return { attendee: newAttendee, ticket: newTicket };
+    });
   }
 
   async createAttendee(attendee: InsertAttendee): Promise<Attendee> {
@@ -241,60 +260,48 @@ export class DatabaseStorage implements IStorage {
   }
 
   // Metrics
+  // Entries are counted once per attendee (result = OK); duplicates and denials are reported separately
   async getEventMetrics(eventId: string): Promise<any> {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
 
-    const [totalCheckins] = await db
-      .select({ count: sql<number>`count(*)::int` })
+    const [row] = await db
+      .select({
+        entered: sql<number>`count(*) filter (where ${checkins.result} = 'OK')::int`,
+        enteredToday: sql<number>`count(*) filter (where ${checkins.result} = 'OK' and ${checkins.timestamp} >= ${startOfDay.toISOString()}::timestamp)::int`,
+        duplicates: sql<number>`count(*) filter (where ${checkins.result} = 'DUP')::int`,
+        denied: sql<number>`count(*) filter (where ${checkins.result} = 'DENIED')::int`,
+      })
       .from(checkins)
       .where(eq(checkins.eventId, eventId));
 
-    const [todayCheckins] = await db
-      .select({ count: sql<number>`count(*)::int` })
-      .from(checkins)
-      .where(and(eq(checkins.eventId, eventId), gte(checkins.timestamp, today)));
-
-    const [duplicates] = await db
-      .select({ count: sql<number>`count(*)::int` })
-      .from(checkins)
-      .where(and(eq(checkins.eventId, eventId), eq(checkins.result, "DUP")));
-
-    const [denied] = await db
-      .select({ count: sql<number>`count(*)::int` })
-      .from(checkins)
-      .where(and(eq(checkins.eventId, eventId), eq(checkins.result, "DENIED")));
-
     return {
-      totalCheckins: totalCheckins?.count || 0,
-      todayCheckins: todayCheckins?.count || 0,
-      duplicates: duplicates?.count || 0,
-      denied: denied?.count || 0,
+      totalCheckins: row?.entered || 0,
+      todayCheckins: row?.enteredToday || 0,
+      duplicates: row?.duplicates || 0,
+      denied: row?.denied || 0,
     };
   }
 
   async getGateMetrics(eventId: string): Promise<any[]> {
-    const gatesList = await this.getGatesByEvent(eventId);
-    
-    const metrics = await Promise.all(
-      gatesList.map(async (gate) => {
-        const count = await this.getCheckinCount(eventId, gate.id);
-        const recentCheckins = await db
-          .select()
-          .from(checkins)
-          .where(and(eq(checkins.gateId, gate.id), eq(checkins.result, "OK")))
-          .orderBy(desc(checkins.timestamp))
-          .limit(1);
-
-        return {
-          ...gate,
-          checkins: count,
-          lastCheckin: recentCheckins[0]?.timestamp,
-        };
-      })
-    );
-
-    return metrics;
+    const [gatesList, stats] = await Promise.all([
+      this.getGatesByEvent(eventId),
+      db
+        .select({
+          gateId: checkins.gateId,
+          entered: sql<number>`count(*) filter (where ${checkins.result} = 'OK')::int`,
+          lastCheckin: sql<Date | null>`max(${checkins.timestamp}) filter (where ${checkins.result} = 'OK')`,
+        })
+        .from(checkins)
+        .where(eq(checkins.eventId, eventId))
+        .groupBy(checkins.gateId),
+    ]);
+    const byGate = new Map(stats.map((s) => [s.gateId, s]));
+    return gatesList.map((gate) => ({
+      ...gate,
+      checkins: byGate.get(gate.id)?.entered ?? 0,
+      lastCheckin: byGate.get(gate.id)?.lastCheckin ?? undefined,
+    }));
   }
 
   // Audit

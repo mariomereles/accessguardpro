@@ -7,35 +7,38 @@ import { Link } from "wouter";
 import { api } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 
-// Default event ID from seed
-const DEFAULT_EVENT_ID = "cf0bd3b2-7f74-4c85-a0f5-f80940cadc39";
+import { useActiveEvent } from "@/hooks/useActiveEvent";
 
 export default function Register() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
+  const { event } = useActiveEvent();
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleSubmit = async (data: any) => {
+    if (!event) {
+      toast({ title: "Registration unavailable", description: "There is no open event right now.", variant: "destructive" });
+      return;
+    }
     setIsSubmitting(true);
     try {
-      const result = await api.registerForEvent(DEFAULT_EVENT_ID, {
+      const result = await api.registerForEvent(event.id, {
         fullName: data.fullName,
         email: data.email,
         phone: data.phone,
         docType: data.docType,
         docNumber: data.docNumber,
-        eventId: DEFAULT_EVENT_ID,
       });
 
       toast({
         title: "Registration Successful!",
-        description: "Your ticket has been generated. Check your email for details.",
+        description: "Your ticket has been generated. Keep this ticket to enter the event.",
       });
 
       // Store ticket data for the ticket page
-      localStorage.setItem("lastTicket", JSON.stringify(result));
+      localStorage.setItem("lastTicket", JSON.stringify({ ...result, event }));
       
-      setLocation(`/me/ticket?eventId=${DEFAULT_EVENT_ID}`);
+      setLocation(`/me/ticket?eventId=${event.id}`);
     } catch (error: any) {
       toast({
         title: "Registration Failed",

@@ -9,26 +9,30 @@ import { api } from "@/lib/api";
 import { subscribeToEvent } from "@/lib/websocket";
 import { useToast } from "@/hooks/use-toast";
 
-// Default event ID from seed
-const DEFAULT_EVENT_ID = "cf0bd3b2-7f74-4c85-a0f5-f80940cadc39";
+import { useActiveEvent } from "@/hooks/useActiveEvent";
 
 export default function AdminDashboard() {
   const { toast } = useToast();
+  const { event } = useActiveEvent();
+  const eventId = event?.id ?? "";
   const [recentCheckins, setRecentCheckins] = useState<any[]>([]);
 
   const { data: metrics, refetch: refetchMetrics } = useQuery({
-    queryKey: ["/api/events", DEFAULT_EVENT_ID, "metrics"],
-    queryFn: () => api.getEventMetrics(DEFAULT_EVENT_ID),
+    queryKey: ["/api/events", eventId, "metrics"],
+    queryFn: () => api.getEventMetrics(eventId),
+    enabled: !!eventId,
   });
 
   const { data: gateMetrics, refetch: refetchGates } = useQuery({
-    queryKey: ["/api/events", DEFAULT_EVENT_ID, "gates", "metrics"],
-    queryFn: () => api.getGateMetrics(DEFAULT_EVENT_ID),
+    queryKey: ["/api/events", eventId, "gates", "metrics"],
+    queryFn: () => api.getGateMetrics(eventId),
+    enabled: !!eventId,
   });
 
   const { data: checkins, refetch: refetchCheckins } = useQuery({
-    queryKey: ["/api/events", DEFAULT_EVENT_ID, "checkins"],
-    queryFn: () => api.getRecentCheckins(DEFAULT_EVENT_ID, 50),
+    queryKey: ["/api/events", eventId, "checkins"],
+    queryFn: () => api.getRecentCheckins(eventId, 50),
+    enabled: !!eventId,
   });
 
   useEffect(() => {
@@ -44,7 +48,8 @@ export default function AdminDashboard() {
   }, [checkins]);
 
   useEffect(() => {
-    const unsubscribe = subscribeToEvent(DEFAULT_EVENT_ID, (data) => {
+    if (!eventId) return;
+    const unsubscribe = subscribeToEvent(eventId, (data) => {
       if (data.type === "checkin") {
         refetchMetrics();
         refetchGates();
@@ -53,7 +58,7 @@ export default function AdminDashboard() {
     });
 
     return () => unsubscribe();
-  }, [refetchMetrics, refetchGates, refetchCheckins]);
+  }, [eventId, refetchMetrics, refetchGates, refetchCheckins]);
 
   const handleToggleGate = async (gateId: string, currentStatus: boolean) => {
     try {
