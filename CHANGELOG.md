@@ -2,6 +2,24 @@
 
 All notable changes to AccessGuard Pro will be documented in this file.
 
+## [Unreleased]
+
+### Security
+- Public registration no longer accepts a `role`; it always creates a `USER`.
+- `.env` removed from version control (rotate any credential that was ever committed).
+- `/api/checkins`, `/api/gates`, `/api/gates/:id/qr`, metrics and event data endpoints now require authentication and a staff role.
+- Socket.IO requires a valid access token from STAFF/ORGANIZER/ADMIN; real-time payloads no longer include personal data.
+- Check-in is single-use per ticket (partial unique index `checkins_one_ok_per_attendee`), validates event/gate/ticket consistency, gate state, event status and capacity, and records denied attempts (`checkins` + `audit_logs`).
+- Access, refresh and ticket tokens are distinct types; refresh tokens are no longer accepted as access tokens; suspended users cannot log in or refresh.
+- Rate limiting, `helmet`, request size limit, same-origin CORS by default, `trust proxy` in production, generic 500 errors, CSV formula-injection escaping, response bodies no longer logged.
+- `GATE_HS_SECRET_DEFAULT` is mandatory in production.
+
+### Fixed
+- Ticket QR codes no longer expire 24 h after registration.
+- Client renews the access token with the refresh token; session survives page reloads.
+- `POST /api/events` and `POST /api/gates` work with JSON payloads.
+- Demo credentials removed from the login screen; STAFF/USER users are routed to their own pages.
+
 ## [1.1.0] - 2025-10-11
 
 ### Added

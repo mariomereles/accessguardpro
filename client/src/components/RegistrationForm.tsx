@@ -27,7 +27,6 @@ const registrationSchema = z.object({
   phone: z.string().min(10, "Phone must be at least 10 digits"),
   docType: z.enum(["passport", "id", "driver_license"]),
   docNumber: z.string().min(5, "Document number required"),
-  ticketType: z.enum(["general", "vip", "staff"]),
 });
 
 type RegistrationFormData = z.infer<typeof registrationSchema>;
@@ -48,7 +47,6 @@ export function RegistrationForm({ onSubmit, eventName }: RegistrationFormProps)
       phone: "",
       docType: "id",
       docNumber: "",
-      ticketType: "general",
     },
   });
 
@@ -150,29 +148,6 @@ export function RegistrationForm({ onSubmit, eventName }: RegistrationFormProps)
               )}
             />
           </div>
-
-          <FormField
-            control={form.control}
-            name="ticketType"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>Ticket Type</FormLabel>
-                <Select onValueChange={field.onChange} defaultValue={field.value}>
-                  <FormControl>
-                    <SelectTrigger data-testid="select-ticket-type">
-                      <SelectValue />
-                    </SelectTrigger>
-                  </FormControl>
-                  <SelectContent>
-                    <SelectItem value="general">General Admission</SelectItem>
-                    <SelectItem value="vip">VIP Access</SelectItem>
-                    <SelectItem value="staff">Staff Pass</SelectItem>
-                  </SelectContent>
-                </Select>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
 
           <Button
             type="submit"

@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, timestamp, boolean, integer, pgEnum } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, timestamp, boolean, integer, pgEnum, uniqueIndex, index } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -81,7 +81,12 @@ export const checkins = pgTable("checkins", {
   deviceId: text("device_id"),
   ipAddress: text("ip_address"),
   userAgent: text("user_agent"),
-});
+}, (t) => [
+  // One successful entry per attendee per event, enforced atomically by the database
+  uniqueIndex("checkins_one_ok_per_attendee").on(t.attendeeId, t.eventId).where(sql`${t.result} = 'OK'`),
+  index("checkins_event_timestamp_idx").on(t.eventId, t.timestamp),
+  index("checkins_gate_idx").on(t.gateId),
+]);
 
 // Metrics counters table
 export const metricsCounters = pgTable("metrics_counters", {

@@ -74,11 +74,11 @@ npm run dev
 
 ## 🔑 Authentication & Access
 
-### Default Admin Credentials
-- **Email**: `admin@test.com`
-- **Password**: `admin123`
+### Initial users
 
-*(Note: This user is created during your first registration. If you need to reset, run the seed script or register a new admin user via API)*
+`npx tsx server/seed.ts` creates a **development** admin (`admin@event.com`) and staff user (`staff@event.com`) with well-known passwords.
+Use it only on local databases, or change those passwords immediately. Public sign-up always creates a `USER`;
+ADMIN / ORGANIZER / STAFF accounts must be created by an administrator or by script.
 
 ### Accessing Admin Dashboard
 

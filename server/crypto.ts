@@ -37,7 +37,10 @@ function loadKeys(): { privateKey: string; publicKey: string } {
 const { privateKey, publicKey } = loadKeys();
 
 // HS256 secret for gate QR codes
-const GATE_SECRET = process.env.GATE_HS_SECRET_DEFAULT || "change_me_in_production";
+if (process.env.NODE_ENV === "production" && !process.env.GATE_HS_SECRET_DEFAULT) {
+  throw new Error("GATE_HS_SECRET_DEFAULT must be set in production");
+}
+const GATE_SECRET = process.env.GATE_HS_SECRET_DEFAULT || "dev-only-gate-secret-not-for-production";
 
 export interface TicketPayload {
   iss: string;
@@ -65,6 +68,7 @@ export interface AuthPayload {
   sub: string;
   email: string;
   role: string;
+  typ: "access";
   iat: number;
   exp: number;
 }
@@ -76,7 +80,7 @@ export function generateTicketQR(
   ticketId: string,
   jti: string
 ): string {
-  const payload: TicketPayload = {
+  const payload: Omit<TicketPayload, "exp"> = {
     iss: "event-access-control",
     aud: "event-checkin",
     sub: attendeeId,
@@ -85,7 +89,8 @@ export function generateTicketQR(
     typ: "ticket",
     jti,
     iat: Math.floor(Date.now() / 1000),
-    exp: Math.floor(Date.now() / 1000) + 24 * 60 * 60, // 24 hours
+    // No exp: validity is decided server-side (revocation, event status), so a
+    // ticket issued days before the event does not silently expire.
   };
 
   return jwt.sign(payload, privateKey, { algorithm: "RS256" });
@@ -93,11 +98,14 @@ export function generateTicketQR(
 
 // Verify ticket QR JWT
 export function verifyTicketQR(token: string): TicketPayload {
-  return jwt.verify(token, publicKey, {
+  const payload = jwt.verify(token, publicKey, {
     algorithms: ["RS256"],
     issuer: "event-access-control",
     audience: "event-checkin",
+    ignoreExpiration: true, // tickets issued before this change carry a 24h exp
   }) as TicketPayload;
+  if (payload.typ !== "ticket") throw new Error("Not a ticket token");
+  return payload;
 }
 
 // Generate gate QR JWT (HS256)
@@ -117,10 +125,12 @@ export function generateGateQR(eventId: string, gateId: string, ttlSeconds: numb
 
 // Verify gate QR JWT
 export function verifyGateQR(token: string): GatePayload {
-  return jwt.verify(token, GATE_SECRET, {
+  const payload = jwt.verify(token, GATE_SECRET, {
     algorithms: ["HS256"],
     issuer: "event-access-control",
   }) as GatePayload;
+  if (payload.typ !== "gate") throw new Error("Not a gate token");
+  return payload;
 }
 
 // Generate auth JWT
@@ -129,8 +139,9 @@ export function generateAuthToken(userId: string, email: string, role: string): 
     sub: userId,
     email,
     role,
+    typ: "access",
     iat: Math.floor(Date.now() / 1000),
-    exp: Math.floor(Date.now() / 1000) + 5 * 60, // 5 minutes
+    exp: Math.floor(Date.now() / 1000) + 15 * 60, // 15 minutes; clients renew with the refresh token
   };
 
   return jwt.sign(payload, privateKey, { algorithm: "RS256" });
@@ -147,7 +158,16 @@ export function generateRefreshToken(userId: string): string {
 
 // Verify auth token
 export function verifyAuthToken(token: string): AuthPayload {
-  return jwt.verify(token, publicKey, { algorithms: ["RS256"] }) as AuthPayload;
+  const payload = jwt.verify(token, publicKey, { algorithms: ["RS256"] }) as AuthPayload;
+  if (payload.typ !== "access") throw new Error("Not an access token");
+  return payload;
+}
+
+// Verify refresh token (must be typ "refresh"; access and ticket tokens are rejected)
+export function verifyRefreshToken(token: string): { sub: string } {
+  const payload = jwt.verify(token, publicKey, { algorithms: ["RS256"] }) as any;
+  if (payload.typ !== "refresh") throw new Error("Not a refresh token");
+  return { sub: payload.sub };
 }
 
 // Hash password

@@ -1,4 +1,5 @@
 import { io, Socket } from "socket.io-client";
+import { getAuthToken } from "./api";
 
 let socket: Socket | null = null;
 
@@ -7,6 +8,8 @@ export function connectWebSocket() {
 
   socket = io({
     path: "/socket.io",
+    // The server only accepts authenticated staff; read the token on every (re)connect
+    auth: (cb) => cb({ token: getAuthToken() }),
   });
 
   socket.on("connect", () => {

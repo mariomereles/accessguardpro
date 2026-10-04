@@ -12,6 +12,42 @@ export function setAuthToken(token: string) {
 export function clearAuthToken() {
   authToken = null;
   localStorage.removeItem("authToken");
+  localStorage.removeItem("refreshToken");
+}
+
+function setRefreshToken(token: string) {
+  localStorage.setItem("refreshToken", token);
+}
+
+// One refresh at a time: concurrent 401s share the same request
+let refreshing: Promise<boolean> | null = null;
+
+async function refreshSession(): Promise<boolean> {
+  const refreshToken = localStorage.getItem("refreshToken");
+  if (!refreshToken) return false;
+  try {
+    const response = await fetch(`${API_BASE}/auth/refresh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refreshToken }),
+    });
+    if (!response.ok) return false;
+    const data = await response.json();
+    setAuthToken(data.accessToken);
+    setRefreshToken(data.refreshToken);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function sessionExpired() {
+  clearAuthToken();
+  currentUser = null;
+  localStorage.removeItem("currentUser");
+  if (!window.location.pathname.startsWith("/login")) {
+    window.location.href = "/login";
+  }
 }
 
 export function getAuthToken() {
@@ -31,7 +67,7 @@ export function getCurrentUser() {
   return currentUser;
 }
 
-async function fetchAPI(url: string, options: RequestInit = {}) {
+async function fetchAPI(url: string, options: RequestInit = {}, retried = false): Promise<any> {
   const headers: any = {
     "Content-Type": "application/json",
     ...options.headers,
@@ -45,6 +81,15 @@ async function fetchAPI(url: string, options: RequestInit = {}) {
     ...options,
     headers,
   });
+
+  // Access tokens are short lived: renew once with the refresh token, then retry
+  if (response.status === 401 && !retried && authToken && !url.startsWith("/auth/")) {
+    refreshing ??= refreshSession().finally(() => { refreshing = null; });
+    if (await refreshing) {
+      return fetchAPI(url, options, true);
+    }
+    sessionExpired();
+  }
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: "Request failed" }));
@@ -62,16 +107,18 @@ export const api = {
       body: JSON.stringify({ email, password }),
     });
     setAuthToken(data.accessToken);
+    setRefreshToken(data.refreshToken);
     setCurrentUser(data.user);
     return data;
   },
 
-  register: async (email: string, password: string, role = "USER") => {
+  register: async (email: string, password: string) => {
     const data = await fetchAPI("/auth/register", {
       method: "POST",
-      body: JSON.stringify({ email, password, role }),
+      body: JSON.stringify({ email, password }),
     });
     setAuthToken(data.accessToken);
+    setRefreshToken(data.refreshToken);
     setCurrentUser(data.user);
     return data;
   },
@@ -152,11 +199,12 @@ export const api = {
 
   // Auth helpers
   getAuthToken: () => authToken,
-  getCurrentUser: () => currentUser,
+  getCurrentUser: () => getCurrentUser(),
   clearAuthToken: () => {
     authToken = null;
     currentUser = null;
     localStorage.removeItem("authToken");
+    localStorage.removeItem("refreshToken");
     localStorage.removeItem("currentUser");
   },
 };

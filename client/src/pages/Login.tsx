@@ -25,12 +25,12 @@ export default function Login() {
     setError("");
 
     try {
-      await login(email, password);
+      const loggedIn = await login(email, password);
       toast({
         title: "✅ Inicio de sesión exitoso",
         description: "Bienvenido al sistema de control de acceso",
       });
-      setLocation("/admin/dashboard");
+      setLocation(loggedIn?.role === "STAFF" ? "/staff/scanner" : loggedIn?.role === "USER" ? "/me/ticket" : "/admin/dashboard");
     } catch (err: any) {
       const errorMessage = err.message || "Credenciales inválidas";
       setError(errorMessage);
@@ -42,16 +42,6 @@ export default function Login() {
     } finally {
       setIsLoading(false);
     }
-  };
-
-  const handleDemoLogin = async () => {
-    setEmail("admin@event.com");
-    setPassword("admin123");
-    // Auto-submit after setting demo credentials
-    setTimeout(() => {
-      const form = document.getElementById("login-form") as HTMLFormElement;
-      form?.requestSubmit();
-    }, 100);
   };
 
   return (
@@ -83,7 +73,7 @@ export default function Login() {
                 <Input
                   id="email"
                   type="email"
-                  placeholder="admin@event.com"
+                  placeholder="correo@ejemplo.com"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   required
@@ -129,33 +119,6 @@ export default function Login() {
               </Button>
             </form>
 
-            <div className="mt-6">
-              <div className="relative">
-                <div className="absolute inset-0 flex items-center">
-                  <span className="w-full border-t border-white/20" />
-                </div>
-                <div className="relative flex justify-center text-xs uppercase">
-                  <span className="bg-background px-2 text-muted-foreground text-slate-400">
-                    O prueba con
-                  </span>
-                </div>
-              </div>
-
-              <Button
-                variant="outline"
-                onClick={handleDemoLogin}
-                className="w-full mt-4 bg-white/5 border-white/20 text-white hover:bg-white/10"
-              >
-                Credenciales de Demo
-              </Button>
-            </div>
-
-            <div className="mt-6 text-center text-sm text-slate-400">
-              <p>Credenciales de administrador:</p>
-              <p className="font-mono text-xs mt-1">
-                admin@event.com / admin123
-              </p>
-            </div>
           </CardContent>
         </Card>
       </div>

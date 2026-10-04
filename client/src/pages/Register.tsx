@@ -24,7 +24,6 @@ export default function Register() {
         phone: data.phone,
         docType: data.docType,
         docNumber: data.docNumber,
-        ticketType: data.ticketType.toUpperCase(),
         eventId: DEFAULT_EVENT_ID,
       });
 

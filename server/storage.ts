@@ -210,6 +210,23 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(checkins.timestamp));
   }
 
+  async getOkCheckin(attendeeId: string, eventId: string): Promise<Checkin | undefined> {
+    const [row] = await db
+      .select()
+      .from(checkins)
+      .where(and(eq(checkins.attendeeId, attendeeId), eq(checkins.eventId, eventId), eq(checkins.result, "OK")))
+      .limit(1);
+    return row;
+  }
+
+  async countOkAtGate(gateId: string): Promise<number> {
+    const [row] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(checkins)
+      .where(and(eq(checkins.gateId, gateId), eq(checkins.result, "OK")));
+    return row?.count || 0;
+  }
+
   async getCheckinCount(eventId: string, gateId?: string): Promise<number> {
     const conditions = gateId
       ? and(eq(checkins.eventId, eventId), eq(checkins.gateId, gateId))
