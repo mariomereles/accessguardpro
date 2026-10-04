@@ -1,13 +1,14 @@
 // Security / anti-fraud regression tests. They start the real server against a Postgres
 // database whose schema is already applied (npm run db:push) and talk to it over HTTP.
 //   DATABASE_URL=postgres://... npm test
+import "./env";
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import crypto from "node:crypto";
 import postgres from "postgres";
 import { io } from "socket.io-client";
-import { hashPassword } from "../server/crypto";
+import { hashPassword, generateDynamicTicketCode, generateTicketQR } from "../server/crypto";
 
 const PORT = 5650;
 const BASE = `http://localhost:${PORT}`;
@@ -246,4 +247,120 @@ test("security headers are present", async () => {
   const r = await fetch(`${BASE}/health`);
   assert.ok(r.headers.get("x-content-type-options"));
   assert.equal(r.headers.get("x-powered-by"), null);
+});
+
+// ---------------------------------------------------------------- rotating QR & fraud controls
+
+const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+async function until<T>(fn: () => Promise<T | undefined | false>, ms = 5000): Promise<T | undefined> {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    const v = await fn();
+    if (v) return v as T;
+    await wait(150);
+  }
+}
+const scanCode = (code: string, gateId: string, token = staffToken) =>
+  call("POST", "/api/checkins", { token, body: { mode: "staff", ticketQR: code, gateId } });
+
+test("ticket QR is a short rotating code derived from a per-ticket secret", async () => {
+  const a = await attendee(eventId, "dyn");
+  assert.ok(a.ticket.secret && a.ticket.qrCode.startsWith("AG1."));
+  assert.ok(a.ticket.qrCode.length < 80, "short enough for an easy-to-scan QR");
+  // a code the phone would compute from the secret works
+  const fresh = generateDynamicTicketCode(a.ticket.secret, a.ticket.jti);
+  assert.equal((await scanCode(fresh, gateOpen)).json.result, "OK");
+});
+
+test("rotating codes reject tampering, stale codes and static QR images", async () => {
+  const a = await attendee(eventId, "stale");
+  const { secret, jti } = a.ticket;
+  const old = generateDynamicTicketCode(secret, jti, Date.now() - 5 * 60_000);
+  assert.equal((await scanCode(old, gateOpen)).json.result, "DENIED", "screenshot older than a few minutes");
+  const future = generateDynamicTicketCode(secret, jti, Date.now() + 5 * 60_000);
+  assert.equal((await scanCode(future, gateOpen)).json.result, "DENIED", "pre-computed future code");
+  const forged = generateDynamicTicketCode("A".repeat(43), jti);
+  assert.equal((await scanCode(forged, gateOpen)).json.result, "DENIED", "wrong secret");
+  const parts = a.ticket.qrCode.split(".");
+  assert.equal((await scanCode([parts[0], parts[1], Number(parts[2]) + 1, parts[3]].join("."), gateOpen)).json.result, "DENIED", "counter changed, mac kept");
+  const staticJwt = generateTicketQR(a.attendee.id, eventId, a.attendee.id, jti);
+  assert.equal((await scanCode(staticJwt, gateOpen)).json.result, "DENIED", "static JWT for a rotating ticket");
+});
+
+test("gates can restrict which ticket types may enter", async () => {
+  const vipOnly = (await call("POST", "/api/gates", { token: adminToken, body: { eventId, name: "vip", location: "L", isActive: true, allowedTicketTypes: ["VIP"] } })).json.id;
+  const general = await attendee(eventId, "typerule");
+  assert.equal((await staffScan(general, vipOnly)).json.result, "DENIED");
+  await sql`update attendees set ticket_type = 'VIP' where id = ${general.attendee.id}`;
+  assert.equal((await staffScan(general, vipOnly)).json.result, "OK");
+});
+
+test("the same person cannot register twice with another email alias or document format", async () => {
+  await attendee(eventId, "ident");
+  const body = (extra: object) => ({ fullName: "Dup", email: `other${run}@x.com`, phone: "555123", docType: "DNI", docNumber: "99ident", ...extra });
+  assert.equal((await call("POST", `/api/events/${eventId}/register`, { body: body({ docNumber: "99-IDENT" }) })).status, 400, "same document, different formatting");
+  assert.equal((await call("POST", `/api/events/${eventId}/register`, { body: body({ email: `ident${run}+promo@example.com`, docNumber: "5551111" }) })).status, 400, "plus alias of the same mailbox");
+});
+
+test("a ticket used at two gates raises a fraud alert", async () => {
+  const gate2 = (await call("POST", "/api/gates", { token: adminToken, body: { eventId, name: "g2", location: "L", isActive: true } })).json.id;
+  const a = await attendee(eventId, "shared");
+  assert.equal((await staffScan(a, gateOpen)).json.result, "OK");
+  assert.equal((await staffScan(a, gate2)).json.result, "DUP");
+  const alert = await until(async () => {
+    const r = await call("GET", `/api/events/${eventId}/alerts`, { token: adminToken });
+    return r.json.find((x: any) => x.type === "DUP_OTHER_GATE");
+  });
+  assert.ok(alert, "DUP_OTHER_GATE alert");
+  assert.equal(alert.severity, "high");
+  assert.equal((await call("GET", `/api/events/${eventId}/alerts`, { token: staffToken })).status, 403, "alerts are for managers");
+});
+
+test("a burst of rejected scans from one account raises an alert", async () => {
+  for (let i = 0; i < 6; i++) await scanCode(`AG1.nonexistent${i}.1.abc`, gateOpen);
+  const alert = await until(async () => {
+    const r = await call("GET", `/api/events/${eventId}/alerts`, { token: adminToken });
+    return r.json.find((x: any) => x.type === "RAPID_DENIALS");
+  });
+  assert.ok(alert, "RAPID_DENIALS alert");
+});
+
+test("managers can revoke a ticket and end an event", async () => {
+  const a = await attendee(eventId, "revoke");
+  assert.equal((await call("POST", `/api/attendees/${a.attendee.id}/revoke`, { token: staffToken })).status, 403);
+  const r = await call("POST", `/api/attendees/${a.attendee.id}/revoke`, { token: adminToken });
+  assert.equal(r.json.revoked, 1);
+  assert.equal((await staffScan(a, gateOpen)).json.result, "DENIED");
+
+  const b = await attendee(otherEventId, "ending");
+  const g = (await call("POST", "/api/gates", { token: adminToken, body: { eventId: otherEventId, name: "og", location: "L", isActive: true } })).json.id;
+  await call("PATCH", `/api/events/${otherEventId}/status`, { token: adminToken, body: { status: "ENDED" } });
+  assert.equal((await staffScan(b, g)).json.result, "DENIED", "ended event admits nobody");
+  await call("PATCH", `/api/events/${otherEventId}/status`, { token: adminToken, body: { status: "ACTIVE" } });
+  assert.equal((await staffScan(b, g)).json.result, "OK");
+});
+
+test("audit log is hash-chained and tampering is detected", async () => {
+  await login(`admin${run}@test.local`, "Admin-pass-123"); // writes a LOGIN row
+  await wait(500);
+  const ok = await call("GET", "/api/audit/verify", { token: adminToken });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.json.valid, true, JSON.stringify(ok.json));
+  assert.ok(ok.json.checked > 5);
+  assert.equal((await call("GET", "/api/audit/verify", { token: staffToken })).status, 403);
+
+  const [victim] = await sql`select seq, metadata from audit_logs where hash is not null order by seq desc offset 2 limit 1`;
+  await sql`update audit_logs set metadata = 'tampered' where seq = ${victim.seq}`;
+  const bad = await call("GET", "/api/audit/verify", { token: adminToken });
+  assert.equal(bad.json.valid, false);
+  assert.equal(Number(bad.json.brokenAtSeq), Number(victim.seq));
+  await sql`update audit_logs set metadata = ${victim.metadata} where seq = ${victim.seq}`;
+  assert.equal((await call("GET", "/api/audit/verify", { token: adminToken })).json.valid, true, "restored");
+});
+
+test("security-relevant actions are audited", async () => {
+  const actions = (await sql`select distinct action from audit_logs`).map((r) => r.action);
+  for (const a of ["LOGIN", "LOGIN_FAILED", "REGISTER", "EVENT_CREATED", "GATE_CREATED", "CHECKIN_DENIED", "TICKET_REVOKED", "FRAUD_ALERT"]) {
+    assert.ok(actions.includes(a), `missing audit action ${a}`);
+  }
 });

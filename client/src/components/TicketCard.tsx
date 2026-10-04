@@ -53,7 +53,7 @@ export function TicketCard({
         </div>
 
         <div className="bg-muted/30 rounded-lg p-6 mb-6 flex items-center justify-center">
-          <canvas ref={canvasRef} className="max-w-full" data-testid="canvas-qr-code" />
+          <canvas ref={canvasRef} className="max-w-full" data-testid="canvas-qr-code" data-code={ticketCode} />
         </div>
 
         <div className="space-y-3 mb-6">

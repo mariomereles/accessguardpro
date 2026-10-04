@@ -108,6 +108,69 @@ export function verifyTicketQR(token: string): TicketPayload {
   return payload;
 }
 
+// ---- Rotating ticket QR -------------------------------------------------------
+// Code format: AG1.<ticket jti>.<30 s window counter>.<truncated HMAC-SHA256>.
+// The attendee's device holds the per-ticket secret and recomputes the code every 30 s, so a
+// screenshot or forwarded image stops working within ~90 s. The server stores the same secret.
+export const DYNAMIC_PREFIX = "AG1";
+export const QR_WINDOW_SECONDS = 30;
+
+export function generateTicketSecret(): string {
+  return crypto.randomBytes(32).toString("base64url");
+}
+
+function dynamicMac(secret: string, jti: string, counter: number): Buffer {
+  return crypto
+    .createHmac("sha256", Buffer.from(secret, "base64url"))
+    .update(`${jti}.${counter}`)
+    .digest()
+    .subarray(0, 16);
+}
+
+export function generateDynamicTicketCode(secret: string, jti: string, at: number = Date.now()): string {
+  const counter = Math.floor(at / 1000 / QR_WINDOW_SECONDS);
+  return `${DYNAMIC_PREFIX}.${jti}.${counter}.${dynamicMac(secret, jti, counter).toString("base64url")}`;
+}
+
+export function isDynamicTicketCode(code: string): boolean {
+  return code.startsWith(`${DYNAMIC_PREFIX}.`);
+}
+
+export function parseDynamicTicketCode(code: string): { jti: string; counter: number; mac: string } | null {
+  const parts = code.split(".");
+  if (parts.length !== 4 || parts[0] !== DYNAMIC_PREFIX) return null;
+  const counter = Number(parts[2]);
+  if (!parts[1] || !Number.isInteger(counter) || !parts[3]) return null;
+  return { jti: parts[1], counter, mac: parts[3] };
+}
+
+// Accepts the current window and one window either side (clock drift between phone and server)
+export function verifyDynamicTicketMac(
+  secret: string,
+  parsed: { jti: string; counter: number; mac: string },
+  at: number = Date.now(),
+  drift = 1
+): boolean {
+  const current = Math.floor(at / 1000 / QR_WINDOW_SECONDS);
+  if (Math.abs(current - parsed.counter) > drift) return false;
+  const expected = dynamicMac(secret, parsed.jti, parsed.counter);
+  const given = Buffer.from(parsed.mac, "base64url");
+  return given.length === expected.length && crypto.timingSafeEqual(given, expected);
+}
+
+// ---- Audit hash chain ---------------------------------------------------------
+if (process.env.NODE_ENV === "production" && !process.env.HASH_CHAIN_SALT) {
+  console.warn("[crypto] HASH_CHAIN_SALT is not set; audit-log integrity relies on a development default");
+}
+const HASH_CHAIN_SALT = process.env.HASH_CHAIN_SALT || "dev-hash-chain-salt";
+
+export function auditHash(prevHash: string | null, fields: Array<string | null>): string {
+  return crypto
+    .createHmac("sha256", HASH_CHAIN_SALT)
+    .update([prevHash ?? "", ...fields.map((f) => f ?? "")].join("\u001f"))
+    .digest("hex");
+}
+
 // Generate gate QR JWT (HS256)
 export function generateGateQR(eventId: string, gateId: string, ttlSeconds: number = 60): string {
   const payload: GatePayload = {

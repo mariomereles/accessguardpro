@@ -169,6 +169,14 @@ export const api = {
     return fetchAPI(`/events/${eventId}/gates/metrics`);
   },
 
+  getTimeSeries: async (eventId: string) => {
+    return fetchAPI(`/events/${eventId}/timeseries`);
+  },
+
+  getAlerts: async (eventId: string) => {
+    return fetchAPI(`/events/${eventId}/alerts`);
+  },
+
   getRecentCheckins: async (eventId: string, limit = 50) => {
     return fetchAPI(`/events/${eventId}/checkins?limit=${limit}`);
   },

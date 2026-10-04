@@ -4,6 +4,15 @@ All notable changes to AccessGuard Pro will be documented in this file.
 
 ## [Unreleased]
 
+### Anti-fraud
+- Rotating ticket QR: `AG1.<jti>.<30 s window>.<HMAC>` derived on the attendee's device from a per-ticket secret; screenshots stop working within ~90 s. Legacy static QR codes are rejected for tickets that have a secret. Codes are 57 chars (easy to scan).
+- Fraud signals with real-time alerts and a dashboard panel: ticket reused at another gate, repeated reuse, bursts of rejected scans from one account.
+- Hash-chained audit log (`audit_logs.prev_hash/hash`) with `GET /api/audit/verify`; logins, registrations, event/gate changes, exports, revocations and denials are audited.
+- Ticket revocation (`POST /api/attendees/:id/revoke`) and event kill-switch (`PATCH /api/events/:id/status`).
+- Gates can restrict ticket types (`allowedTicketTypes`); duplicate identities (same document, `+alias` emails) are rejected.
+- Dashboard chart now shows real entries per gate (`GET /api/events/:id/timeseries`) instead of sample data.
+
+
 ### Security
 - Public registration no longer accepts a `role`; it always creates a `USER`.
 - `.env` removed from version control (rotate any credential that was ever committed).

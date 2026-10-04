@@ -47,6 +47,18 @@ export default function AdminDashboard() {
     }
   }, [checkins]);
 
+  const { data: series, refetch: refetchSeries } = useQuery({
+    queryKey: ["/api/events", eventId, "timeseries"],
+    queryFn: () => api.getTimeSeries(eventId),
+    enabled: !!eventId,
+  });
+
+  const { data: alerts, refetch: refetchAlerts } = useQuery({
+    queryKey: ["/api/events", eventId, "alerts"],
+    queryFn: () => api.getAlerts(eventId),
+    enabled: !!eventId,
+  });
+
   useEffect(() => {
     if (!eventId) return;
     const unsubscribe = subscribeToEvent(eventId, (data) => {
@@ -54,11 +66,16 @@ export default function AdminDashboard() {
         refetchMetrics();
         refetchGates();
         refetchCheckins();
+        refetchSeries();
+      }
+      if (data.type === "alert") {
+        refetchAlerts();
+        toast({ title: "Fraud alert", description: data.data?.message, variant: "destructive" });
       }
     });
 
     return () => unsubscribe();
-  }, [eventId, refetchMetrics, refetchGates, refetchCheckins]);
+  }, [eventId, refetchMetrics, refetchGates, refetchCheckins, refetchSeries, refetchAlerts]);
 
   const handleToggleGate = async (gateId: string, currentStatus: boolean) => {
     try {
@@ -77,20 +94,22 @@ export default function AdminDashboard() {
     }
   };
 
-  // Mock chart data - would come from time-series metrics in real app
-  const chartData = [
-    { time: "14:00", mainEntrance: 24, vipGate: 8, eastEntry: 12 },
-    { time: "14:15", mainEntrance: 32, vipGate: 12, eastEntry: 15 },
-    { time: "14:30", mainEntrance: 45, vipGate: 18, eastEntry: 22 },
-    { time: "14:45", mainEntrance: 38, vipGate: 15, eastEntry: 18 },
-    { time: "15:00", mainEntrance: 42, vipGate: 20, eastEntry: 25 },
-  ];
-
-  const chartLines = [
-    { dataKey: "mainEntrance", name: "Main Entrance", color: "hsl(var(--chart-1))" },
-    { dataKey: "vipGate", name: "VIP Gate", color: "hsl(var(--chart-2))" },
-    { dataKey: "eastEntry", name: "East Entry", color: "hsl(var(--chart-3))" },
-  ];
+  // Real entries per 15 minutes and gate (one line per gate)
+  const chartColors = ["hsl(var(--chart-1))", "hsl(var(--chart-2))", "hsl(var(--chart-3))", "hsl(var(--chart-4))", "hsl(var(--chart-5))"];
+  const chartLines = (gateMetrics || []).map((g: any, i: number) => ({
+    dataKey: g.id,
+    name: g.name,
+    color: chartColors[i % chartColors.length],
+  }));
+  const chartData = Object.values(
+    (series || []).reduce((acc: Record<string, any>, p: any) => {
+      const row = (acc[p.bucket] ??= {
+        time: new Date(p.bucket).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      });
+      row[p.gateId] = p.count;
+      return acc;
+    }, {})
+  ) as any[];
 
   return (
     <div className="space-y-8">
@@ -123,6 +142,27 @@ export default function AdminDashboard() {
           icon={DoorOpen}
         />
       </div>
+
+      {/* Fraud alerts */}
+      {alerts && alerts.length > 0 && (
+        <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-4" data-testid="card-fraud-alerts">
+          <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
+            <AlertTriangle className="h-5 w-5 text-destructive" />
+            Fraud alerts
+          </h2>
+          <ul className="space-y-2 text-sm">
+            {alerts.slice(0, 5).map((a: any) => (
+              <li key={a.id} className="flex items-start gap-3">
+                <span className={`mt-0.5 rounded px-2 py-0.5 text-xs font-medium ${a.severity === "high" ? "bg-destructive text-destructive-foreground" : "bg-muted"}`}>
+                  {a.severity}
+                </span>
+                <span className="flex-1">{a.message}</span>
+                <span className="text-muted-foreground">{new Date(a.timestamp).toLocaleTimeString()}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {/* Chart */}
       <ChartContainer

@@ -15,11 +15,17 @@ import {
   generateRefreshToken,
   verifyAuthToken,
   verifyRefreshToken,
+  generateTicketSecret,
+  generateDynamicTicketCode,
+  isDynamicTicketCode,
+  parseDynamicTicketCode,
+  verifyDynamicTicketMac,
   hashPassword,
   verifyPassword,
   generateQRCodeDataURL,
 } from "./crypto";
 import { generateTicketPDF, type TicketPDFData } from "./pdf";
+import { afterDenied, afterDuplicate } from "./fraud";
 import { authMiddleware, requireRole, type AuthRequest } from "./middleware";
 import { insertAttendeeSchema, insertEventSchema, insertGateSchema } from "@shared/schema";
 
@@ -105,14 +111,17 @@ const eventInput = insertEventSchema.extend({
 });
 
 const gateInput = insertGateSchema.extend({
+  allowedTicketTypes: z.array(z.enum(["GENERAL", "VIP", "STAFF"])).nullable().optional(),
   name: z.string().trim().min(1).max(100),
   location: z.string().trim().min(1).max(200),
   capacity: z.number().int().positive().nullable().optional(),
 });
 
-const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: "draft-7", legacyHeaders: false });
-const registerLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 20, standardHeaders: "draft-7", legacyHeaders: false });
-const checkinLimiter = rateLimit({ windowMs: 60 * 1000, limit: 120, standardHeaders: "draft-7", legacyHeaders: false });
+// RATE_LIMIT_MULTIPLIER lets automated tests (which hammer the API) raise every limit
+const mult = Number(process.env.RATE_LIMIT_MULTIPLIER) || 1;
+const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30 * mult, standardHeaders: "draft-7", legacyHeaders: false });
+const registerLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 20 * mult, standardHeaders: "draft-7", legacyHeaders: false });
+const checkinLimiter = rateLimit({ windowMs: 60 * 1000, limit: 120 * mult, standardHeaders: "draft-7", legacyHeaders: false });
 
 // Used to equalise login timing when the email does not exist
 let dummyHashPromise: Promise<string> | null = null;
@@ -154,6 +163,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
     io.to(`event:${eventId}`).emit("update", data);
   };
 
+  // Tamper-evident audit trail (hash-chained). Never lets a logging failure break a request.
+  const audit = (actorId: string | null, action: string, entity: string, entityId: string | null, meta: Record<string, unknown> = {}) =>
+    storage
+      .createAuditLog({ actorUserId: actorId, action, entity, entityId, metadata: JSON.stringify(meta) } as any)
+      .catch((e) => console.error("[audit] failed to write", action, e));
+
   // ============= AUTH ROUTES =============
 
   // Register (public sign-up always creates a USER; privileged roles are never self-assignable)
@@ -177,6 +192,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const accessToken = generateAuthToken(user.id, user.email, user.role);
       const refreshToken = generateRefreshToken(user.id);
+      await audit(user.id, "REGISTER", "user", user.id, { ip: req.ip });
 
       res.json({ user: { id: user.id, email: user.email, role: user.role }, accessToken, refreshToken });
     } catch (error) {
@@ -197,8 +213,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         : (await verifyPassword(password, await getDummyHash()), false);
 
       if (!user || !valid || user.status !== "ACTIVE") {
+        await audit(user?.id ?? null, "LOGIN_FAILED", "user", email, { ip: req.ip, reason: !user ? "unknown" : !valid ? "password" : "inactive" });
         return res.status(401).json({ error: "Invalid credentials" });
       }
+      await audit(user.id, "LOGIN", "user", user.id, { ip: req.ip });
 
       const accessToken = generateAuthToken(user.id, user.email, user.role);
       const refreshToken = generateRefreshToken(user.id);
@@ -252,19 +270,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: "Already registered for this event" });
       }
 
+      // Same document (any formatting) or the same mailbox through "+tag" aliases
+      const docNormalized = data.docNumber.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+      if (await storage.findDuplicateIdentity(eventId, data.docType, docNormalized, email)) {
+        return res.status(400).json({ error: "Already registered for this event" });
+      }
+
       // ticketType is never taken from the client: public registration is always GENERAL.
       // If the registrant is logged in, the attendee is bound to that account.
       const jti = nanoid();
+      const secret = generateTicketSecret();
       let code = "";
       const { attendee, ticket } = await storage.registerAttendee(
         { ...data, email, eventId, ticketType: "GENERAL", userId: optionalUser(req)?.sub ?? null } as any,
         (attendeeId) => {
-          code = generateTicketQR(attendeeId, eventId, attendeeId, jti);
-          return { code, jti };
+          // Rotating QR: the device derives a fresh code every 30 s from this per-ticket secret
+          code = generateDynamicTicketCode(secret, jti);
+          return { code, jti, secret };
         }
       );
 
-      res.json({ attendee, ticket: { ...ticket, qrCode: code } });
+      res.json({ attendee, ticket: { ...ticket, qrCode: code } }); // includes `secret` for the ticket holder only
     } catch (error: any) {
       if (error?.code === "23505") {
         return res.status(400).json({ error: "Already registered for this event" });
@@ -307,10 +333,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(404).json({ error: "Event not found" });
       }
 
-      // Generate QR code data URL
-      const qrDataURL = await generateQRCodeDataURL(ticket.code);
+      // Rotating tickets: hand out a currently valid code (the client keeps refreshing it itself)
+      const currentCode = ticket.secret ? generateDynamicTicketCode(ticket.secret, ticket.jti) : ticket.code;
+      const qrDataURL = await generateQRCodeDataURL(currentCode);
 
       if (format === 'pdf') {
+        if (ticket.secret) {
+          return res.status(409).json({ error: "Rotating tickets cannot be printed; open the ticket on your phone" });
+        }
         // Generate PDF
         const pdfData: TicketPDFData = {
           attendeeName: attendee.fullName,
@@ -331,7 +361,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         // Return JSON with QR data URL
         res.json({
           attendee,
-          ticket: { ...ticket, qrCode: ticket.code, qrDataURL },
+          ticket: { ...ticket, qrCode: currentCode, qrDataURL },
           event,
         });
       }
@@ -421,6 +451,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         } catch (e) {
           console.error("[checkin] failed to record denial:", e);
         }
+        afterDenied(user.sub, ctx.eventId ?? null, emitUpdate).catch((e) => console.error("[fraud]", e));
         return res.json({ result: "DENIED", reason });
       };
 
@@ -429,12 +460,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(403).json({ error: "Forbidden" });
       }
 
-      // Ticket signature
-      let ticketPayload;
-      try {
-        ticketPayload = verifyTicketQR(body.ticketQR);
-      } catch {
-        return deny("Invalid ticket");
+      // Ticket: rotating code (current) or legacy static JWT (only for tickets without a secret)
+      let ticketPayload: { evt: string; sub: string; jti: string };
+      if (isDynamicTicketCode(body.ticketQR)) {
+        const parsed = parseDynamicTicketCode(body.ticketQR);
+        const t = parsed ? await storage.getTicketByJti(parsed.jti) : undefined;
+        if (!parsed || !t?.secret || !verifyDynamicTicketMac(t.secret, parsed)) {
+          return deny("Invalid or expired ticket code");
+        }
+        const holder = await storage.getAttendee(t.attendeeId);
+        if (!holder) return deny("Invalid ticket");
+        ticketPayload = { evt: holder.eventId, sub: t.attendeeId, jti: t.jti };
+      } else {
+        let legacy;
+        try {
+          legacy = verifyTicketQR(body.ticketQR);
+        } catch {
+          return deny("Invalid ticket");
+        }
+        ticketPayload = { evt: legacy.evt, sub: legacy.sub, jti: legacy.jti };
+        const t = await storage.getTicketByJti(legacy.jti);
+        if (t?.secret) {
+          return deny("Static QR is no longer valid: open the ticket to show the live code", { eventId: legacy.evt, attendeeId: legacy.sub });
+        }
       }
 
       // Which event and gate?
@@ -484,11 +532,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!gate.isActive) {
         return deny("Gate is closed", ctx);
       }
+      if (gate.allowedTicketTypes?.length && !gate.allowedTicketTypes.includes(attendee.ticketType)) {
+        return deny("Ticket type not allowed at this gate", ctx);
+      }
 
       // One entry per ticket: if it was already used, answer DUP
-      const respondDup = async (original?: { timestamp: Date }) => {
+      const respondDup = async (original?: { timestamp: Date; gateId?: string }) => {
         const dup = await storage.createCheckin({ eventId, attendeeId, gateId, method, result: "DUP", ...meta });
         emitUpdate(eventId, { type: "checkin", data: { id: dup.id, result: "DUP", timestamp: dup.timestamp, attendee: publicAttendee(attendee), gate: publicGate(gate) } });
+        afterDuplicate(attendeeId, eventId, gateId, original as any, emitUpdate).catch((e) => console.error("[fraud]", e));
         return res.json({
           result: "DUP",
           reason: "Ticket already used",
@@ -586,6 +638,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Entries over time per gate (real data for the dashboard chart)
+  app.get("/api/events/:eventId/timeseries", authMiddleware, requireRole(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+    try {
+      const eventId = eventIdParam.parse(req.params.eventId);
+      res.json(await storage.getEntriesTimeSeries(eventId));
+    } catch (error) {
+      handleError(res, error);
+    }
+  });
+
   // Export check-ins CSV
   app.get("/api/events/:eventId/exports/checkins.csv", authMiddleware, requireRole("ADMIN"), async (req: AuthRequest, res: Response) => {
     try {
@@ -593,6 +655,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const checkins = await storage.getCheckinsByEvent(eventId, 10000);
       const enriched = await enrichCheckins(checkins);
+      await audit(req.user!.sub, "CHECKINS_EXPORTED", "event", eventId, { rows: checkins.length });
 
       const csvHeader = "Timestamp,Attendee Name,Email,Gate,Method,Result,Device ID\n";
       const csvRows = enriched.map((c) =>
@@ -655,6 +718,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const data = eventInput.parse(req.body);
       const event = await storage.createEvent(data);
+      await audit(req.user!.sub, "EVENT_CREATED", "event", event.id, { name: event.name });
       res.json(event);
     } catch (error) {
       handleError(res, error);
@@ -687,6 +751,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const data = gateInput.parse(req.body);
       const gate = await storage.createGate(data);
+      await audit(req.user!.sub, "GATE_CREATED", "gate", gate.id, { eventId: gate.eventId, name: gate.name });
       res.json(gate);
     } catch (error) {
       handleError(res, error);
@@ -699,7 +764,60 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const gateId = z.string().max(64).parse(req.params.gateId);
       const { isActive } = z.object({ isActive: z.boolean() }).parse(req.body);
       await storage.updateGateStatus(gateId, isActive);
+      await audit(req.user!.sub, isActive ? "GATE_OPENED" : "GATE_CLOSED", "gate", gateId);
       res.json({ success: true });
+    } catch (error) {
+      handleError(res, error);
+    }
+  });
+
+  // ============= FRAUD CONTROLS =============
+
+  // Revoke every ticket of an attendee (kill-switch for a stolen or sold-twice ticket)
+  app.post("/api/attendees/:attendeeId/revoke", authMiddleware, requireRole(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+    try {
+      const attendeeId = z.string().max(64).parse(req.params.attendeeId);
+      const attendee = await storage.getAttendee(attendeeId);
+      if (!attendee) return res.status(404).json({ error: "Attendee not found" });
+      const revoked = await storage.revokeTicketsByAttendee(attendeeId);
+      await audit(req.user!.sub, "TICKET_REVOKED", "attendee", attendeeId, { eventId: attendee.eventId, revoked });
+      res.json({ revoked });
+    } catch (error) {
+      handleError(res, error);
+    }
+  });
+
+  // Event kill-switch: ENDED / CANCELLED events stop admitting people immediately
+  app.patch("/api/events/:eventId/status", authMiddleware, requireRole(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+    try {
+      const eventId = eventIdParam.parse(req.params.eventId);
+      const { status } = z.object({ status: z.enum(["DRAFT", "ACTIVE", "ENDED", "CANCELLED"]) }).parse(req.body);
+      if (!(await storage.getEvent(eventId))) return res.status(404).json({ error: "Event not found" });
+      await storage.updateEventStatus(eventId, status);
+      await audit(req.user!.sub, "EVENT_STATUS_CHANGED", "event", eventId, { eventId, status });
+      res.json({ success: true, status });
+    } catch (error) {
+      handleError(res, error);
+    }
+  });
+
+  // Recent fraud alerts for an event
+  app.get("/api/events/:eventId/alerts", authMiddleware, requireRole(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+    try {
+      const eventId = eventIdParam.parse(req.params.eventId);
+      const rows = await storage.getRecentAuditLogs("FRAUD_ALERT", eventId, 50);
+      res.json(
+        rows.map((r) => ({ id: r.id, timestamp: r.timestamp, ...JSON.parse(r.metadata || "{}") }))
+      );
+    } catch (error) {
+      handleError(res, error);
+    }
+  });
+
+  // Verify the audit log has not been altered
+  app.get("/api/audit/verify", authMiddleware, requireRole("ADMIN"), async (_req: AuthRequest, res: Response) => {
+    try {
+      res.json(await storage.verifyAuditChain());
     } catch (error) {
       handleError(res, error);
     }

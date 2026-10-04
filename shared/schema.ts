@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, timestamp, boolean, integer, pgEnum, uniqueIndex, index } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, timestamp, boolean, integer, bigserial, pgEnum, uniqueIndex, index } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -42,6 +42,8 @@ export const gates = pgTable("gates", {
   isActive: boolean("is_active").notNull().default(true),
   capacityType: gateCapacityTypeEnum("capacity_type").notNull().default("unlimited"),
   capacity: integer("capacity"),
+  // Ticket types admitted at this gate (null = every type)
+  allowedTicketTypes: text("allowed_ticket_types").array(),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 }, (t) => [index("gates_event_idx").on(t.eventId)]);
 
@@ -69,6 +71,8 @@ export const tickets = pgTable("tickets", {
   attendeeId: varchar("attendee_id").notNull().references(() => attendees.id),
   code: text("code").notNull().unique(),
   jti: text("jti").notNull().unique(),
+  // Per-ticket secret behind the rotating (30 s) QR code; null for legacy static tickets
+  secret: text("secret"),
   issuedAt: timestamp("issued_at").notNull().defaultNow(),
   revokedAt: timestamp("revoked_at"),
 }, (t) => [index("tickets_attendee_idx").on(t.attendeeId)]);
@@ -106,13 +110,20 @@ export const metricsCounters = pgTable("metrics_counters", {
 // Audit logs table
 export const auditLogs = pgTable("audit_logs", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  seq: bigserial("seq", { mode: "number" }),
   actorUserId: varchar("actor_user_id").references(() => users.id),
   action: text("action").notNull(),
   entity: text("entity").notNull(),
   entityId: text("entity_id"),
   timestamp: timestamp("timestamp").notNull().defaultNow(),
   metadata: text("metadata"),
-});
+  // Tamper evidence: hash = HMAC(salt, prev_hash | fields), each row chained to the previous one
+  prevHash: text("prev_hash"),
+  hash: text("hash"),
+}, (t) => [
+  index("audit_logs_action_ts_idx").on(t.action, t.timestamp),
+  index("audit_logs_seq_idx").on(t.seq),
+]);
 
 // Insert schemas
 export const insertUserSchema = createInsertSchema(users).omit({ id: true, createdAt: true });

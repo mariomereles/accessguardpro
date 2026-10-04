@@ -1,5 +1,6 @@
 import { db } from "./db";
 import { eq, and, desc, gte, sql } from "drizzle-orm";
+import { auditHash } from "./crypto";
 import {
   users,
   events,
@@ -160,7 +161,7 @@ export class DatabaseStorage implements IStorage {
   // Attendee and ticket are created atomically: no orphan attendees if ticket creation fails
   async registerAttendee(
     attendee: InsertAttendee,
-    makeTicket: (attendeeId: string) => { code: string; jti: string }
+    makeTicket: (attendeeId: string) => { code: string; jti: string; secret?: string }
   ): Promise<{ attendee: Attendee; ticket: Ticket }> {
     return db.transaction(async (tx) => {
       const [newAttendee] = await tx.insert(attendees).values(attendee).returning();
@@ -229,6 +230,14 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(checkins.timestamp));
   }
 
+  async countCheckinsSince(attendeeId: string, eventId: string, result: "OK" | "DUP" | "DENIED", since: Date): Promise<number> {
+    const [row] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(checkins)
+      .where(and(eq(checkins.attendeeId, attendeeId), eq(checkins.eventId, eventId), eq(checkins.result, result), gte(checkins.timestamp, since)));
+    return row?.count || 0;
+  }
+
   async getOkCheckin(attendeeId: string, eventId: string): Promise<Checkin | undefined> {
     const [row] = await db
       .select()
@@ -283,6 +292,18 @@ export class DatabaseStorage implements IStorage {
     };
   }
 
+  // Entries (result = OK) per gate in 15-minute buckets, newest 6 hours
+  async getEntriesTimeSeries(eventId: string): Promise<Array<{ bucket: string; gateId: string; count: number }>> {
+    const since = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+    const rows = await db.execute(sql`
+      select to_char(to_timestamp(floor(extract(epoch from ${checkins.timestamp}) / 900) * 900) at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as bucket,
+             ${checkins.gateId} as gate_id, count(*)::int as count
+      from ${checkins}
+      where ${checkins.eventId} = ${eventId} and ${checkins.result} = 'OK' and ${checkins.timestamp} >= ${since}::timestamp
+      group by 1, 2 order by 1`);
+    return (rows as any[]).map((r) => ({ bucket: r.bucket, gateId: r.gate_id, count: r.count }));
+  }
+
   async getGateMetrics(eventId: string): Promise<any[]> {
     const [gatesList, stats] = await Promise.all([
       this.getGatesByEvent(eventId),
@@ -305,9 +326,95 @@ export class DatabaseStorage implements IStorage {
   }
 
   // Audit
-  async createAuditLog(log: Omit<AuditLog, "id" | "timestamp">): Promise<void> {
-    await db.insert(auditLogs).values(log as any);
+  // Append-only, hash-chained: each row's hash covers the previous row's hash, so editing or
+  // deleting any past row breaks verification from that point on. Writes are serialised with an
+  // advisory lock so the chain has a single, well-defined order.
+  async createAuditLog(log: Omit<AuditLog, "id" | "timestamp" | "seq" | "prevHash" | "hash">): Promise<void> {
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(727401)`);
+      const [last] = await tx
+        .select({ hash: auditLogs.hash })
+        .from(auditLogs)
+        .where(sql`${auditLogs.hash} is not null`)
+        .orderBy(desc(auditLogs.seq))
+        .limit(1);
+      const prevHash = last?.hash ?? null;
+      const timestamp = new Date();
+      const hash = auditHash(prevHash, [
+        log.actorUserId ?? null, log.action, log.entity, log.entityId ?? null, timestamp.toISOString(), log.metadata ?? null,
+      ]);
+      await tx.insert(auditLogs).values({ ...(log as any), timestamp, prevHash, hash });
+    });
   }
+
+  async verifyAuditChain(): Promise<{ valid: boolean; checked: number; brokenAtSeq?: number }> {
+    const rows = await db
+      .select()
+      .from(auditLogs)
+      .where(sql`${auditLogs.hash} is not null`)
+      .orderBy(auditLogs.seq);
+    // The first hashed row is the genesis of the chain (prevHash null); every later row must
+    // chain from the hash of the one before it.
+    let prev: string | null = null;
+    let checked = 0;
+    for (const r of rows) {
+      const expected = auditHash(prev, [
+        r.actorUserId ?? null, r.action, r.entity, r.entityId ?? null, r.timestamp.toISOString(), r.metadata ?? null,
+      ]);
+      if (r.hash !== expected || (r.prevHash ?? null) !== prev) {
+        return { valid: false, checked, brokenAtSeq: r.seq ?? undefined };
+      }
+      prev = r.hash;
+      checked++;
+    }
+    return { valid: true, checked };
+  }
+
+  async getRecentAuditLogs(action: string, eventId: string, limit = 50): Promise<AuditLog[]> {
+    return db
+      .select()
+      .from(auditLogs)
+      .where(and(eq(auditLogs.action, action), sql`((${auditLogs.metadata})::jsonb ->> 'eventId' = ${eventId} or (${auditLogs.metadata})::jsonb ->> 'eventId' is null)`))
+      .orderBy(desc(auditLogs.seq))
+      .limit(limit);
+  }
+
+  async countAuditLogsSince(action: string, since: Date, filter?: { actorUserId?: string; entityId?: string }): Promise<number> {
+    const conds = [eq(auditLogs.action, action), gte(auditLogs.timestamp, since)];
+    if (filter?.actorUserId) conds.push(eq(auditLogs.actorUserId, filter.actorUserId));
+    if (filter?.entityId) conds.push(eq(auditLogs.entityId, filter.entityId));
+    const [row] = await db.select({ count: sql<number>`count(*)::int` }).from(auditLogs).where(and(...conds));
+    return row?.count || 0;
+  }
+
+  // Tickets
+  async revokeTicketsByAttendee(attendeeId: string): Promise<number> {
+    const rows = await db
+      .update(tickets)
+      .set({ revokedAt: new Date() })
+      .where(and(eq(tickets.attendeeId, attendeeId), sql`${tickets.revokedAt} is null`))
+      .returning({ id: tickets.id });
+    return rows.length;
+  }
+
+  // Identity de-duplication: same document, or the same mailbox through "+tag" aliases
+  async findDuplicateIdentity(eventId: string, docType: string, docNumber: string, email: string): Promise<Attendee | undefined> {
+    const canonical = email.toLowerCase().replace(/\+[^@]*@/, "@");
+    const [row] = await db
+      .select()
+      .from(attendees)
+      .where(and(
+        eq(attendees.eventId, eventId),
+        sql`(
+          (upper(regexp_replace(${attendees.docNumber}, '[^A-Za-z0-9]', '', 'g')) = ${docNumber}
+             and upper(${attendees.docType}) = ${docType.toUpperCase()})
+          or regexp_replace(lower(${attendees.email}), '\\+[^@]*@', '@') = ${canonical}
+        )`
+      ))
+      .limit(1);
+    return row;
+  }
+
 }
 
 export const storage = new DatabaseStorage();
