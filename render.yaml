@@ -3,7 +3,7 @@ services:
     name: accessguard-pro
     runtime: node
     plan: free
-    buildCommand: npm ci --include=dev && npm run build && npm run db:push -- --force
+    buildCommand: npm ci --include=dev && npm run build && npm run db:migrate
     startCommand: npm start
     healthCheckPath: /health
     envVars:

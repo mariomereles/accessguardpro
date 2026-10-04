@@ -4,6 +4,9 @@ import cors from "cors";
 import helmet from "helmet";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
+import crypto from "crypto";
+import { client } from "./db";
+import { recordRequest, renderMetrics } from "./metrics";
 
 const app = express();
 
@@ -25,8 +28,24 @@ if (corsOrigins?.length) {
 app.use(express.json({ limit: "100kb" }));
 app.use(express.urlencoded({ extended: false }));
 
-app.get("/health", (_req, res) => {
-  res.json({ status: "ok" });
+// Liveness + dependency check (no details are exposed)
+app.get("/health", async (_req, res) => {
+  try {
+    await client`select 1`;
+    res.json({ status: "ok" });
+  } catch {
+    res.status(503).json({ status: "degraded" });
+  }
+});
+
+// Prometheus metrics: disabled unless METRICS_TOKEN is set, then requires "Authorization: Bearer <token>"
+app.get("/metrics", (req, res) => {
+  const token = process.env.METRICS_TOKEN;
+  if (!token) return res.status(404).end();
+  const given = Buffer.from((req.headers.authorization || "").replace(/^Bearer /, ""));
+  const wanted = Buffer.from(token);
+  if (given.length !== wanted.length || !crypto.timingSafeEqual(given, wanted)) return res.status(401).end();
+  res.type("text/plain; version=0.0.4").send(renderMetrics());
 });
 
 app.use((req, res, next) => {
@@ -35,12 +54,13 @@ app.use((req, res, next) => {
   res.on("finish", () => {
     const duration = Date.now() - start;
     if (path.startsWith("/api")) {
-      let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
-      if (logLine.length > 80) {
-        logLine = logLine.slice(0, 79) + "…";
+      recordRequest(req.method, res.statusCode, duration);
+      if (process.env.NODE_ENV === "production") {
+        // One JSON object per line: easy to ship to any log platform
+        console.log(JSON.stringify({ level: "info", msg: "http", method: req.method, path, status: res.statusCode, ms: duration, ip: req.ip }));
+      } else {
+        log(`${req.method} ${path} ${res.statusCode} in ${duration}ms`);
       }
-
-      log(logLine);
     }
   });
 

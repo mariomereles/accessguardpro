@@ -8,7 +8,7 @@ interface ProtectedRouteProps {
 }
 
 export function ProtectedRoute({ children, requireAdmin = false }: ProtectedRouteProps) {
-  const { isAuthenticated, isAdmin, isLoading } = useAuth();
+  const { isAuthenticated, isManager, isLoading } = useAuth();
 
   if (isLoading) {
     return (
@@ -26,7 +26,8 @@ export function ProtectedRoute({ children, requireAdmin = false }: ProtectedRout
     return null;
   }
 
-  if (requireAdmin && !isAdmin) {
+  // The admin area is for platform admins, organization admins and organizers
+  if (requireAdmin && !isManager) {
     return (
       <div className="flex items-center justify-center min-h-screen">
         <div className="text-center">

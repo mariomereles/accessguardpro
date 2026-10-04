@@ -4,7 +4,7 @@
 import "./env";
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import crypto from "node:crypto";
 import postgres from "postgres";
 import { io } from "socket.io-client";
@@ -19,6 +19,8 @@ const run = crypto.randomBytes(4).toString("hex");
 
 let server: ChildProcess;
 let adminToken = "", staffToken = "", userToken = "", userRefresh = "";
+let orgA = "", orgB = "", eventB = "", gateB = "";
+let organizerToken = "", orgAdminToken = "", staffBToken = "";
 let eventId = "", otherEventId = "";
 let gateOpen = "", gateClosed = "", gateLimited = "", gateOtherEvent = "";
 
@@ -51,7 +53,7 @@ const staffScan = (t: any, gateId: string, token = staffToken) =>
 before(async () => {
   // Run node directly (not via npx) so kill() really stops the server
   server = spawn(process.execPath, ["--import", "tsx", "server/index.ts"], {
-    env: { ...process.env, DATABASE_URL, PORT: String(PORT), NODE_ENV: "development", REDIS_URL: "" },
+    env: { ...process.env, DATABASE_URL, PORT: String(PORT), NODE_ENV: "development", REDIS_URL: "", METRICS_TOKEN: "test-metrics-token" },
     stdio: "ignore",
   });
   for (let i = 0; i < 60; i++) {
@@ -61,21 +63,33 @@ before(async () => {
 
   const pw = "Admin-pass-123";
   const hash = await hashPassword(pw);
-  await sql`insert into users (email, password_hash, role, status) values
-    (${`admin${run}@test.local`}, ${hash}, 'ADMIN', 'ACTIVE'),
-    (${`staff${run}@test.local`}, ${hash}, 'STAFF', 'ACTIVE')`;
+  // Two tenants. `admin` is a platform administrator (no organization); the rest belong to org A or B.
+  [{ id: orgA }] = await sql`insert into organizations (name) values (${`A-${run}`}) returning id`;
+  [{ id: orgB }] = await sql`insert into organizations (name) values (${`B-${run}`}) returning id`;
+  await sql`insert into users (email, password_hash, role, status, org_id) values
+    (${`admin${run}@test.local`}, ${hash}, 'ADMIN', 'ACTIVE', null),
+    (${`staff${run}@test.local`}, ${hash}, 'STAFF', 'ACTIVE', ${orgA}),
+    (${`organizer${run}@test.local`}, ${hash}, 'ORGANIZER', 'ACTIVE', ${orgA}),
+    (${`orgadmin${run}@test.local`}, ${hash}, 'ADMIN', 'ACTIVE', ${orgA}),
+    (${`staffb${run}@test.local`}, ${hash}, 'STAFF', 'ACTIVE', ${orgB})`;
   adminToken = (await login(`admin${run}@test.local`, pw)).accessToken;
   staffToken = (await login(`staff${run}@test.local`, pw)).accessToken;
-  assert.ok(adminToken && staffToken, "seed users must be able to log in");
+  organizerToken = (await login(`organizer${run}@test.local`, pw)).accessToken;
+  orgAdminToken = (await login(`orgadmin${run}@test.local`, pw)).accessToken;
+  staffBToken = (await login(`staffb${run}@test.local`, pw)).accessToken;
+  assert.ok(adminToken && staffToken && organizerToken && orgAdminToken && staffBToken, "seed users must be able to log in");
 
-  const ev = await call("POST", "/api/events", { token: adminToken, body: { name: `T-${run}`, venue: "V", startsAt: "2030-01-01T10:00:00Z", endsAt: "2030-01-01T18:00:00Z", status: "ACTIVE" } });
-  const ev2 = await call("POST", "/api/events", { token: adminToken, body: { name: `T2-${run}`, venue: "V", startsAt: "2030-01-01T10:00:00Z", endsAt: "2030-01-01T18:00:00Z", status: "ACTIVE" } });
-  eventId = ev.json.id; otherEventId = ev2.json.id;
+  const mkEvent = (name: string, org: string) => call("POST", "/api/events", { token: adminToken, body: { name: `${name}-${run}`, venue: "V", startsAt: "2030-01-01T10:00:00Z", endsAt: "2030-01-01T18:00:00Z", status: "ACTIVE", orgId: org } });
+  const ev = await mkEvent("T", orgA);
+  const ev2 = await mkEvent("T2", orgA);
+  const evB = await mkEvent("TB", orgB);
+  eventId = ev.json.id; otherEventId = ev2.json.id; eventB = evB.json.id;
   const gate = async (evt: string, extra: object) => (await call("POST", "/api/gates", { token: adminToken, body: { eventId: evt, location: "L", ...extra } })).json.id;
   gateOpen = await gate(eventId, { name: "open", isActive: true });
   gateClosed = await gate(eventId, { name: "closed", isActive: false });
   gateLimited = await gate(eventId, { name: "limited", isActive: true, capacityType: "limited", capacity: 1 });
   gateOtherEvent = await gate(otherEventId, { name: "other", isActive: true });
+  gateB = await gate(eventB, { name: "b", isActive: true });
 
   const u = (await register(`user${run}@test.local`)).json;
   userToken = u.accessToken; userRefresh = u.refreshToken;
@@ -363,4 +377,140 @@ test("security-relevant actions are audited", async () => {
   for (const a of ["LOGIN", "LOGIN_FAILED", "REGISTER", "EVENT_CREATED", "GATE_CREATED", "CHECKIN_DENIED", "TICKET_REVOKED", "FRAUD_ALERT"]) {
     assert.ok(actions.includes(a), `missing audit action ${a}`);
   }
+});
+
+// ---------------------------------------------------------------- multi-tenancy
+
+test("organizations are isolated from each other", async () => {
+  // org A staff cannot see org B's event data, org B staff cannot see org A's
+  for (const path of ["metrics", "checkins", "timeseries", "gates", "gates/metrics"]) {
+    assert.equal((await call("GET", `/api/events/${eventB}/${path}`, { token: staffToken })).status, 404, `A -> B ${path}`);
+    assert.equal((await call("GET", `/api/events/${eventId}/${path}`, { token: staffBToken })).status, 404, `B -> A ${path}`);
+  }
+  assert.equal((await call("GET", `/api/events/${eventId}/metrics`, { token: staffToken })).status, 200);
+  assert.equal((await call("GET", `/api/events/${eventB}/metrics`, { token: adminToken })).status, 200, "platform admin sees every tenant");
+  // listings are scoped
+  const gatesA = (await call("GET", "/api/gates", { token: organizerToken })).json;
+  assert.ok(gatesA.length > 0 && gatesA.every((g: any) => g.eventId !== eventB), "organizer gate list excludes org B");
+  assert.ok((await call("GET", "/api/gates", { token: adminToken })).json.some((g: any) => g.eventId === eventB));
+  const eventsA = (await call("GET", "/api/events", { token: organizerToken })).json;
+  assert.ok(eventsA.some((e: any) => e.id === eventId) && !eventsA.some((e: any) => e.id === eventB));
+  const mine = (await call("GET", "/api/me/events", { token: staffBToken })).json;
+  assert.deepEqual(mine.map((e: any) => e.id), [eventB]);
+});
+
+test("staff cannot admit people to another organization's event", async () => {
+  const a = await attendee(eventId, "xtenant");
+  assert.equal((await staffScan(a, gateOpen, staffBToken)).json.result, "DENIED");
+  // and cannot manage another organization's resources
+  assert.equal((await call("POST", "/api/gates", { token: organizerToken, body: { eventId: eventB, name: "x", location: "L" } })).status, 404);
+  assert.equal((await call("PATCH", `/api/gates/${gateB}/status`, { token: organizerToken, body: { isActive: false } })).status, 404);
+  assert.equal((await call("GET", `/api/gates/${gateB}/qr`, { token: staffToken })).status, 404);
+  assert.equal((await call("POST", `/api/attendees/${a.attendee.id}/revoke`, { token: staffBToken })).status, 403);
+  const own = await call("PATCH", `/api/events/${eventId}/status`, { token: orgAdminToken, body: { status: "ACTIVE" } });
+  assert.equal(own.status, 200, "own organization is fine");
+});
+
+test("organizers create events inside their own organization", async () => {
+  const r = await call("POST", "/api/events", { token: organizerToken, body: { name: `Own-${run}`, venue: "V", startsAt: "2030-02-01T10:00:00Z", endsAt: "2030-02-01T18:00:00Z", status: "ACTIVE", orgId: orgB } });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.orgId, orgA, "orgId in the body is ignored for non-platform users");
+});
+
+test("only platform administrators manage organizations; org admins manage their own users", async () => {
+  assert.equal((await call("POST", "/api/orgs", { token: orgAdminToken, body: { name: `Nope-${run}` } })).status, 403);
+  assert.equal((await call("GET", "/api/orgs", { token: orgAdminToken })).status, 403);
+  assert.equal((await call("GET", "/api/orgs", { token: staffToken })).status, 403);
+  const created = await call("POST", "/api/orgs", { token: adminToken, body: { name: `New-${run}` } });
+  assert.equal(created.status, 200);
+  assert.equal((await call("POST", "/api/orgs", { token: adminToken, body: { name: `New-${run}` } })).status, 400, "duplicate name");
+
+  const pw = "A-long-password-1";
+  const weak = await call("POST", "/api/users", { token: orgAdminToken, body: { email: `weak${run}@t.local`, password: "short", role: "STAFF" } });
+  assert.equal(weak.status, 400);
+  const u = await call("POST", "/api/users", { token: orgAdminToken, body: { email: `crew${run}@t.local`, password: pw, role: "STAFF", orgId: orgB } });
+  assert.equal(u.status, 200);
+  assert.equal(u.json.orgId, orgA, "org admin cannot place users in another organization");
+  assert.ok(!("passwordHash" in u.json));
+  assert.equal((await call("POST", "/api/users", { token: staffToken, body: { email: `x${run}@t.local`, password: pw, role: "STAFF" } })).status, 403);
+  const platform = await call("POST", "/api/users", { token: adminToken, body: { email: `lead${run}@t.local`, password: pw, role: "ORGANIZER", orgId: orgB } });
+  assert.equal(platform.json.orgId, orgB);
+  assert.equal((await call("POST", "/api/users", { token: adminToken, body: { email: `nobody${run}@t.local`, password: pw, role: "STAFF" } })).status, 400, "staff need an organization");
+
+  const listA = (await call("GET", "/api/users", { token: orgAdminToken })).json;
+  assert.ok(listA.length > 0 && listA.every((x: any) => x.orgId === orgA));
+
+  // suspending a user ends their sessions immediately
+  const session = await login(`crew${run}@t.local`, pw);
+  assert.equal((await call("PATCH", `/api/users/${u.json.id}/status`, { token: orgAdminToken, body: { status: "SUSPENDED" } })).status, 200);
+  assert.equal((await call("POST", "/api/auth/refresh", { body: { refreshToken: session.refreshToken } })).status, 401);
+  assert.equal((await call("POST", "/api/auth/login", { body: { email: `crew${run}@t.local`, password: pw } })).status, 401);
+  assert.equal((await call("PATCH", `/api/users/${platform.json.id}/status`, { token: orgAdminToken, body: { status: "SUSPENDED" } })).status, 404, "other organization's user");
+});
+
+// ---------------------------------------------------------------- sessions
+
+test("refresh tokens rotate, reuse revokes the session, logout revokes it", async () => {
+  const email = `sess${run}@test.local`;
+  await register(email);
+  const s1 = await login(email, "password123");
+  const r1 = await call("POST", "/api/auth/refresh", { body: { refreshToken: s1.refreshToken } });
+  assert.equal(r1.status, 200);
+  assert.notEqual(r1.json.refreshToken, s1.refreshToken, "a new refresh token is issued");
+  // the retired token was used long ago (outside the race grace window) -> theft: whole family revoked
+  await sql`update refresh_tokens set revoked_at = now() - interval '1 minute' where user_id = (select id from users where email = ${email}) and revoked_at is not null`;
+  assert.equal((await call("POST", "/api/auth/refresh", { body: { refreshToken: s1.refreshToken } })).status, 401, "reuse rejected");
+  assert.equal((await call("POST", "/api/auth/refresh", { body: { refreshToken: r1.json.refreshToken } })).status, 401, "descendant revoked too");
+
+  const s2 = await login(email, "password123");
+  assert.equal((await call("POST", "/api/auth/logout", { body: { refreshToken: s2.refreshToken } })).status, 200);
+  assert.equal((await call("POST", "/api/auth/refresh", { body: { refreshToken: s2.refreshToken } })).status, 401, "logged-out session");
+  assert.equal((await call("POST", "/api/auth/logout", { body: { refreshToken: "garbage" } })).status, 200, "logout never fails");
+});
+
+// ---------------------------------------------------------------- retention, health, metrics, startup
+
+test("attendee data can be anonymized only after the event is over, by its own organization", async () => {
+  const evId = (await call("POST", "/api/events", { token: adminToken, body: { name: `Gdpr-${run}`, venue: "V", startsAt: "2030-03-01T10:00:00Z", endsAt: "2030-03-01T18:00:00Z", status: "ACTIVE", orgId: orgA } })).json.id;
+  const a = await attendee(evId, "gdpr");
+  assert.equal((await call("POST", `/api/events/${evId}/anonymize`, { token: organizerToken })).status, 409, "event still active");
+  await call("PATCH", `/api/events/${evId}/status`, { token: organizerToken, body: { status: "ENDED" } });
+  assert.equal((await call("POST", `/api/events/${evId}/anonymize`, { token: staffToken })).status, 403);
+  assert.equal((await call("POST", `/api/events/${evId}/anonymize`, { token: staffBToken })).status, 403);
+  const done = await call("POST", `/api/events/${evId}/anonymize`, { token: organizerToken });
+  assert.equal(done.json.anonymized, 1);
+  const [row] = await sql`select full_name, email, phone, doc_number from attendees where id = ${a.attendee.id}`;
+  assert.equal(row.full_name, "Anonymized");
+  assert.ok(row.email.endsWith("@anonymized.invalid") && !/gdpr/.test(row.email));
+  assert.ok(!/99gdpr/.test(row.doc_number) && row.phone === "anonymized");
+  assert.equal((await call("POST", `/api/events/${evId}/anonymize`, { token: organizerToken })).json.anonymized, 0, "idempotent");
+});
+
+test("health checks the database; metrics are token-protected", async () => {
+  assert.deepEqual((await call("GET", "/health")).json, { status: "ok" });
+  const noToken = await fetch(`${BASE}/metrics`);
+  assert.equal(noToken.status, 401);
+  const wrong = await fetch(`${BASE}/metrics`, { headers: { authorization: "Bearer nope" } });
+  assert.equal(wrong.status, 401);
+  const ok = await fetch(`${BASE}/metrics`, { headers: { authorization: "Bearer test-metrics-token" } });
+  assert.equal(ok.status, 200);
+  const text = await ok.text();
+  assert.match(text, /http_requests_total\{/);
+  assert.match(text, /checkins_total\{result="OK"\}/);
+  assert.ok(!/@|password/i.test(text), "no personal data in metrics");
+});
+
+test("production refuses to start without JWT keys unless explicitly allowed", () => {
+  const run1 = (extra: Record<string, string>) =>
+    spawnSync(process.execPath, ["--import", "tsx", "server/index.ts"], {
+      env: { ...process.env, JWT_PRIVATE_KEY: "", JWT_PUBLIC_KEY: "", NODE_ENV: "production", PORT: "5651", DATABASE_URL, ...extra },
+      encoding: "utf8",
+      timeout: 8000,
+    });
+  const strict = run1({});
+  assert.notEqual(strict.status, 0);
+  assert.match(strict.stderr, /JWT_PRIVATE_KEY and JWT_PUBLIC_KEY must be set in production/);
+  const bad = run1({ JWT_PRIVATE_KEY: "not-a-key", JWT_PUBLIC_KEY: "not-a-key" });
+  assert.notEqual(bad.status, 0);
+  assert.match(bad.stderr, /not valid PEM keys/);
 });

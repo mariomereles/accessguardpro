@@ -13,7 +13,7 @@ import { useActiveEvent } from "@/hooks/useActiveEvent";
 
 export default function AdminDashboard() {
   const { toast } = useToast();
-  const { event } = useActiveEvent();
+  const { event } = useActiveEvent({ scoped: true });
   const eventId = event?.id ?? "";
   const [recentCheckins, setRecentCheckins] = useState<any[]>([]);
 

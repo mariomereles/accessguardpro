@@ -28,7 +28,7 @@ jobs:
       - run: npm ci
       - run: npm run check          # TypeScript
       - run: npm run build
-      - run: npm run db:push -- --force
+      - run: npm run db:migrate
       - run: npm test               # security / anti-fraud regression tests
       - run: npm audit --omit=dev --audit-level=high
         continue-on-error: true

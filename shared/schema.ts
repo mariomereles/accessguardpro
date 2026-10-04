@@ -12,6 +12,14 @@ export const checkinMethodEnum = pgEnum("checkin_method", ["GATE_QR", "TICKET_QR
 export const checkinResultEnum = pgEnum("checkin_result", ["OK", "DUP", "DENIED"]);
 export const gateCapacityTypeEnum = pgEnum("gate_capacity_type", ["limited", "unlimited", "unmeasured"]);
 
+// Organizations (tenants): ORGANIZER/STAFF users and events belong to one organization.
+// ADMIN users without an organization are platform administrators and see everything.
+export const organizations = pgTable("organizations", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  name: text("name").notNull().unique(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
 // Users table
 export const users = pgTable("users", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
@@ -19,8 +27,20 @@ export const users = pgTable("users", {
   passwordHash: text("password_hash").notNull(),
   role: userRoleEnum("role").notNull().default("USER"),
   status: userStatusEnum("status").notNull().default("ACTIVE"),
+  orgId: varchar("org_id").references(() => organizations.id),
   createdAt: timestamp("created_at").notNull().defaultNow(),
-});
+}, (t) => [index("users_org_idx").on(t.orgId)]);
+
+// Refresh tokens: one row per issued token (id = jti). Rotated on every use; presenting a token
+// that was already rotated revokes its whole family (stolen-token detection). Logout revokes it.
+export const refreshTokens = pgTable("refresh_tokens", {
+  id: varchar("id").primaryKey(),
+  userId: varchar("user_id").notNull().references(() => users.id),
+  familyId: varchar("family_id").notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  revokedAt: timestamp("revoked_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+}, (t) => [index("refresh_tokens_user_idx").on(t.userId), index("refresh_tokens_family_idx").on(t.familyId)]);
 
 // Events table
 export const events = pgTable("events", {
@@ -30,8 +50,9 @@ export const events = pgTable("events", {
   startsAt: timestamp("starts_at").notNull(),
   endsAt: timestamp("ends_at").notNull(),
   status: eventStatusEnum("status").notNull().default("DRAFT"),
+  orgId: varchar("org_id").references(() => organizations.id),
   createdAt: timestamp("created_at").notNull().defaultNow(),
-});
+}, (t) => [index("events_org_idx").on(t.orgId)]);
 
 // Gates table
 export const gates = pgTable("gates", {
@@ -126,6 +147,7 @@ export const auditLogs = pgTable("audit_logs", {
 ]);
 
 // Insert schemas
+export const insertOrganizationSchema = createInsertSchema(organizations).omit({ id: true, createdAt: true });
 export const insertUserSchema = createInsertSchema(users).omit({ id: true, createdAt: true });
 export const insertEventSchema = createInsertSchema(events).omit({ id: true, createdAt: true });
 export const insertGateSchema = createInsertSchema(gates).omit({ id: true, createdAt: true });
@@ -134,6 +156,7 @@ export const insertTicketSchema = createInsertSchema(tickets).omit({ id: true, i
 export const insertCheckinSchema = createInsertSchema(checkins).omit({ id: true, timestamp: true });
 
 // Types
+export type Organization = typeof organizations.$inferSelect;
 export type User = typeof users.$inferSelect;
 export type InsertUser = z.infer<typeof insertUserSchema>;
 

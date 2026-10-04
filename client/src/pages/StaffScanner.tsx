@@ -19,7 +19,7 @@ import { useActiveEvent } from "@/hooks/useActiveEvent";
 
 export default function StaffScanner() {
   const { toast } = useToast();
-  const { event } = useActiveEvent();
+  const { event } = useActiveEvent({ scoped: true });
   const eventId = event?.id ?? "";
   const [showScanner, setShowScanner] = useState(false);
   const [showSuccess, setShowSuccess] = useState(false);

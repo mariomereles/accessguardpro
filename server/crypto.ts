@@ -13,6 +13,9 @@ const normalizePem = (value?: string) =>
     .replace(/\\n/g, "\n")
     .trim();
 
+const isProduction = process.env.NODE_ENV === "production";
+const allowEphemeral = process.env.ALLOW_EPHEMERAL_JWT_KEYS === "true";
+
 function loadKeys(): { privateKey: string; publicKey: string } {
   const priv = normalizePem(process.env.JWT_PRIVATE_KEY);
   const pub = normalizePem(process.env.JWT_PUBLIC_KEY);
@@ -22,9 +25,15 @@ function loadKeys(): { privateKey: string; publicKey: string } {
       crypto.createPublicKey(pub);
       return { privateKey: priv, publicKey: pub };
     } catch (err: any) {
+      if (isProduction && !allowEphemeral) {
+        throw new Error(`JWT_PRIVATE_KEY/JWT_PUBLIC_KEY are not valid PEM keys: ${err.message}`);
+      }
       console.error("[crypto] JWT_PRIVATE_KEY/JWT_PUBLIC_KEY are not valid PEM keys, using a temporary pair:", err.message);
     }
   } else {
+    if (isProduction && !allowEphemeral) {
+      throw new Error("JWT_PRIVATE_KEY and JWT_PUBLIC_KEY must be set in production (or set ALLOW_EPHEMERAL_JWT_KEYS=true to accept sessions and tickets that break on every restart)");
+    }
     console.warn("[crypto] JWT keys not configured, using a temporary pair");
   }
   return crypto.generateKeyPairSync("rsa", {
@@ -68,6 +77,7 @@ export interface AuthPayload {
   sub: string;
   email: string;
   role: string;
+  org: string | null; // organization (tenant); null = platform administrator
   typ: "access";
   iat: number;
   exp: number;
@@ -197,11 +207,12 @@ export function verifyGateQR(token: string): GatePayload {
 }
 
 // Generate auth JWT
-export function generateAuthToken(userId: string, email: string, role: string): string {
+export function generateAuthToken(userId: string, email: string, role: string, org: string | null = null): string {
   const payload: AuthPayload = {
     sub: userId,
     email,
     role,
+    org,
     typ: "access",
     iat: Math.floor(Date.now() / 1000),
     exp: Math.floor(Date.now() / 1000) + 15 * 60, // 15 minutes; clients renew with the refresh token
@@ -210,12 +221,14 @@ export function generateAuthToken(userId: string, email: string, role: string): 
   return jwt.sign(payload, privateKey, { algorithm: "RS256" });
 }
 
-// Generate refresh token
-export function generateRefreshToken(userId: string): string {
+// Generate refresh token. `jti` identifies the row in refresh_tokens, `family` groups every token
+// descended from one login so a whole session can be revoked together.
+export const REFRESH_TTL_SECONDS = 7 * 24 * 60 * 60;
+export function generateRefreshToken(userId: string, jti: string, family: string): string {
   return jwt.sign(
-    { sub: userId, typ: "refresh" },
+    { sub: userId, typ: "refresh", jti, fam: family },
     privateKey,
-    { algorithm: "RS256", expiresIn: "7d" }
+    { algorithm: "RS256", expiresIn: REFRESH_TTL_SECONDS }
   );
 }
 
@@ -227,10 +240,10 @@ export function verifyAuthToken(token: string): AuthPayload {
 }
 
 // Verify refresh token (must be typ "refresh"; access and ticket tokens are rejected)
-export function verifyRefreshToken(token: string): { sub: string } {
-  const payload = jwt.verify(token, publicKey, { algorithms: ["RS256"] }) as any;
-  if (payload.typ !== "refresh") throw new Error("Not a refresh token");
-  return { sub: payload.sub };
+export function verifyRefreshToken(token: string, opts: { ignoreExpiration?: boolean } = {}): { sub: string; jti: string; fam: string } {
+  const payload = jwt.verify(token, publicKey, { algorithms: ["RS256"], ...opts }) as any;
+  if (payload.typ !== "refresh" || !payload.jti || !payload.fam) throw new Error("Not a refresh token");
+  return { sub: payload.sub, jti: payload.jti, fam: payload.fam };
 }
 
 // Hash password

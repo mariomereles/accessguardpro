@@ -14,6 +14,7 @@ interface AuthContextType {
   logout: () => void;
   isAuthenticated: boolean;
   isAdmin: boolean;
+  isManager: boolean;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -57,6 +58,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
   };
 
   const logout = () => {
+    void api.logout(); // revoke the session on the server (fire and forget)
     api.clearAuthToken();
     setUser(null);
   };
@@ -68,6 +70,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     logout,
     isAuthenticated: !!user,
     isAdmin: user?.role === 'ADMIN',
+    isManager: user?.role === 'ADMIN' || user?.role === 'ORGANIZER',
   };
 
   return (

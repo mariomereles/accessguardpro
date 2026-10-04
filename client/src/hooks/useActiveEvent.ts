@@ -10,10 +10,13 @@ export interface ActiveEvent {
 }
 
 // The event the app currently works with: the first ACTIVE event (replaces the old hard-coded seed id).
-export function useActiveEvent() {
+// `scoped` (signed-in staff and managers) lists only the events of the user's organization;
+// the public registration page lists every open event.
+export function useActiveEvent(options: { scoped?: boolean } = {}) {
+  const scoped = !!options.scoped;
   const { data, isPending, error } = useQuery<ActiveEvent[]>({
-    queryKey: ["/api/events/active"],
-    queryFn: () => api.getActiveEvents(),
+    queryKey: [scoped ? "/api/me/events" : "/api/events/active"],
+    queryFn: () => (scoped ? api.getMyEvents() : api.getActiveEvents()),
     staleTime: 60_000,
   });
   return { event: data?.[0], isLoading: isPending, error };

@@ -15,6 +15,7 @@ import {
   generateRefreshToken,
   verifyAuthToken,
   verifyRefreshToken,
+  REFRESH_TTL_SECONDS,
   generateTicketSecret,
   generateDynamicTicketCode,
   isDynamicTicketCode,
@@ -27,7 +28,8 @@ import {
 import { generateTicketPDF, type TicketPDFData } from "./pdf";
 import { afterDenied, afterDuplicate } from "./fraud";
 import { authMiddleware, requireRole, type AuthRequest } from "./middleware";
-import { insertAttendeeSchema, insertEventSchema, insertGateSchema } from "@shared/schema";
+import { insertAttendeeSchema, insertEventSchema, insertGateSchema, type User } from "@shared/schema";
+import { incr, setWsConnections } from "./metrics";
 
 // Gate QR rotation cache
 const gateQRCache = new Map<string, { token: string; expiresAt: number }>();
@@ -152,15 +154,56 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // WebSocket for real-time updates
   io.on("connection", (socket) => {
-    socket.on("subscribe:event", (eventId: unknown) => {
+    setWsConnections(io.engine.clientsCount);
+    socket.on("disconnect", () => setWsConnections(io.engine.clientsCount));
+    socket.on("subscribe:event", async (eventId: unknown) => {
       if (typeof eventId !== "string" || eventId.length > 64 || socket.rooms.size > 5) return;
-      socket.join(`event:${eventId}`);
+      try {
+        if (await canAccessEvent(socket.data.user, eventId)) socket.join(`event:${eventId}`);
+      } catch {
+        /* ignore */
+      }
     });
   });
 
   // Helper to emit real-time updates
   const emitUpdate = (eventId: string, data: any) => {
     io.to(`event:${eventId}`).emit("update", data);
+  };
+
+  // Creates a session: short-lived access token + a rotating refresh token stored server-side
+  async function issueSession(user: User, familyId?: string) {
+    const family = familyId ?? nanoid();
+    const jti = nanoid();
+    await storage.createRefreshToken({
+      id: jti,
+      userId: user.id,
+      familyId: family,
+      expiresAt: new Date(Date.now() + REFRESH_TTL_SECONDS * 1000),
+    });
+    return {
+      accessToken: generateAuthToken(user.id, user.email, user.role, user.orgId ?? null),
+      refreshToken: generateRefreshToken(user.id, jti, family),
+    };
+  }
+
+  // Tenant isolation: platform admins (ADMIN without organization) see everything; everyone else
+  // only the events of their own organization. Callers answer 404, never 403, so event ids of
+  // other organizations are not revealed.
+  const isPlatformAdmin = (u: { role: string; org?: string | null }) => u.role === "ADMIN" && !u.org;
+  async function canAccessEvent(u: { role: string; org?: string | null }, eventId: string): Promise<boolean> {
+    if (isPlatformAdmin(u)) return !!(await storage.getEvent(eventId));
+    const ev = await storage.getEvent(eventId);
+    return !!ev && !!u.org && ev.orgId === u.org;
+  }
+  const requireEventAccess = (param = "eventId") => async (req: AuthRequest, res: Response, next: any) => {
+    try {
+      const id = z.string().max(64).parse(req.params[param]);
+      if (await canAccessEvent(req.user!, id)) return next();
+      return res.status(404).json({ error: "Event not found" });
+    } catch (error) {
+      handleError(res, error);
+    }
   };
 
   // Tamper-evident audit trail (hash-chained). Never lets a logging failure break a request.
@@ -190,8 +233,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         status: "ACTIVE",
       });
 
-      const accessToken = generateAuthToken(user.id, user.email, user.role);
-      const refreshToken = generateRefreshToken(user.id);
+      const { accessToken, refreshToken } = await issueSession(user);
       await audit(user.id, "REGISTER", "user", user.id, { ip: req.ip });
 
       res.json({ user: { id: user.id, email: user.email, role: user.role }, accessToken, refreshToken });
@@ -218,8 +260,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       await audit(user.id, "LOGIN", "user", user.id, { ip: req.ip });
 
-      const accessToken = generateAuthToken(user.id, user.email, user.role);
-      const refreshToken = generateRefreshToken(user.id);
+      const { accessToken, refreshToken } = await issueSession(user);
 
       res.json({ user: { id: user.id, email: user.email, role: user.role }, accessToken, refreshToken });
     } catch (error) {
@@ -227,24 +268,52 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Refresh token
+  // Refresh token: single use. Every call returns a NEW refresh token and retires the old one; a
+  // token that is presented again after it was rotated means it leaked, so the whole session
+  // (family) is revoked.
   app.post("/api/auth/refresh", authLimiter, async (req: Request, res: Response) => {
+    const invalid = () => res.status(401).json({ error: "Invalid refresh token" });
     try {
       const { refreshToken } = z.object({ refreshToken: z.string().max(4096) }).parse(req.body);
-      const payload = verifyRefreshToken(refreshToken);
+      const claims = verifyRefreshToken(refreshToken);
 
-      const user = await storage.getUser(payload.sub);
+      const row = await storage.getRefreshToken(claims.jti);
+      if (!row || row.userId !== claims.sub || row.familyId !== claims.fam) return invalid();
+
+      if (row.revokedAt) {
+        // Two tabs refreshing at the same instant is normal: give a short grace before calling it theft
+        if (Date.now() - row.revokedAt.getTime() > 10_000) {
+          await storage.revokeRefreshFamily(row.familyId);
+          await audit(row.userId, "REFRESH_REUSE_DETECTED", "user", row.userId, { ip: req.ip, family: row.familyId });
+        }
+        return invalid();
+      }
+      if (!(await storage.consumeRefreshToken(row.id))) return invalid();
+
+      const user = await storage.getUser(claims.sub);
       if (!user || user.status !== "ACTIVE") {
-        return res.status(401).json({ error: "Invalid refresh token" });
+        await storage.revokeRefreshFamily(row.familyId);
+        return invalid();
       }
 
-      const accessToken = generateAuthToken(user.id, user.email, user.role);
-      const newRefreshToken = generateRefreshToken(user.id);
-
-      res.json({ accessToken, refreshToken: newRefreshToken });
+      storage.deleteExpiredRefreshTokens().catch(() => {});
+      res.json(await issueSession(user, row.familyId));
     } catch (error) {
-      res.status(401).json({ error: "Invalid refresh token" });
+      invalid();
     }
+  });
+
+  // Logout: revokes the whole session on the server (the access token expires on its own within 15 min)
+  app.post("/api/auth/logout", authLimiter, async (req: Request, res: Response) => {
+    try {
+      const { refreshToken } = z.object({ refreshToken: z.string().max(4096) }).parse(req.body);
+      const claims = verifyRefreshToken(refreshToken, { ignoreExpiration: true });
+      await storage.revokeRefreshFamily(claims.fam);
+      await audit(claims.sub, "LOGOUT", "user", claims.sub, { ip: req.ip });
+    } catch {
+      // nothing to revoke; logging out must always succeed from the client's point of view
+    }
+    res.json({ success: true });
   });
 
   // ============= REGISTRATION & TICKETS =============
@@ -378,7 +447,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const { gateId } = req.params;
 
       const gate = await storage.getGate(gateId);
-      if (!gate) {
+      if (!gate || !(await canAccessEvent(req.user!, gate.eventId))) {
         return res.status(404).json({ error: "Gate not found" });
       }
 
@@ -451,6 +520,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         } catch (e) {
           console.error("[checkin] failed to record denial:", e);
         }
+        incr("checkins_total", { result: "DENIED" });
         afterDenied(user.sub, ctx.eventId ?? null, emitUpdate).catch((e) => console.error("[fraud]", e));
         return res.json({ result: "DENIED", reason });
       };
@@ -526,6 +596,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!event || event.status !== "ACTIVE") {
         return deny("Event is not active", ctx);
       }
+      // Staff may only admit people to events of their own organization
+      if (body.mode === "staff" && !isPlatformAdmin(user) && (!user.org || event.orgId !== user.org)) {
+        return deny("Not authorized for this event", ctx);
+      }
       if (!gate || gate.eventId !== eventId) {
         return deny("Unknown gate for this event", { eventId, attendeeId });
       }
@@ -540,6 +614,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const respondDup = async (original?: { timestamp: Date; gateId?: string }) => {
         const dup = await storage.createCheckin({ eventId, attendeeId, gateId, method, result: "DUP", ...meta });
         emitUpdate(eventId, { type: "checkin", data: { id: dup.id, result: "DUP", timestamp: dup.timestamp, attendee: publicAttendee(attendee), gate: publicGate(gate) } });
+        incr("checkins_total", { result: "DUP" });
         afterDuplicate(attendeeId, eventId, gateId, original as any, emitUpdate).catch((e) => console.error("[fraud]", e));
         return res.json({
           result: "DUP",
@@ -588,6 +663,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         data: { id: checkin.id, result: "OK", timestamp: checkin.timestamp, attendee: publicAttendee(attendee), gate: publicGate(gate) },
       });
 
+      incr("checkins_total", { result: "OK" });
       res.json({
         result: "OK",
         attendee: publicAttendee(attendee),
@@ -617,7 +693,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   }
 
   // Event metrics summary
-  app.get("/api/events/:eventId/metrics", authMiddleware, requireRole(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  app.get("/api/events/:eventId/metrics", authMiddleware, requireRole(...STAFF_ROLES), requireEventAccess(), async (req: AuthRequest, res: Response) => {
     try {
       const eventId = eventIdParam.parse(req.params.eventId);
       const metrics = await storage.getEventMetrics(eventId);
@@ -628,7 +704,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Gate metrics
-  app.get("/api/events/:eventId/gates/metrics", authMiddleware, requireRole(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  app.get("/api/events/:eventId/gates/metrics", authMiddleware, requireRole(...STAFF_ROLES), requireEventAccess(), async (req: AuthRequest, res: Response) => {
     try {
       const eventId = eventIdParam.parse(req.params.eventId);
       const metrics = await storage.getGateMetrics(eventId);
@@ -639,7 +715,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Entries over time per gate (real data for the dashboard chart)
-  app.get("/api/events/:eventId/timeseries", authMiddleware, requireRole(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  app.get("/api/events/:eventId/timeseries", authMiddleware, requireRole(...STAFF_ROLES), requireEventAccess(), async (req: AuthRequest, res: Response) => {
     try {
       const eventId = eventIdParam.parse(req.params.eventId);
       res.json(await storage.getEntriesTimeSeries(eventId));
@@ -649,7 +725,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Export check-ins CSV
-  app.get("/api/events/:eventId/exports/checkins.csv", authMiddleware, requireRole("ADMIN"), async (req: AuthRequest, res: Response) => {
+  app.get("/api/events/:eventId/exports/checkins.csv", authMiddleware, requireRole("ADMIN"), requireEventAccess(), async (req: AuthRequest, res: Response) => {
     try {
       const eventId = eventIdParam.parse(req.params.eventId);
 
@@ -679,7 +755,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Recent check-ins (no phone / document number; email and network data only for managers)
-  app.get("/api/events/:eventId/checkins", authMiddleware, requireRole(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  app.get("/api/events/:eventId/checkins", authMiddleware, requireRole(...STAFF_ROLES), requireEventAccess(), async (req: AuthRequest, res: Response) => {
     try {
       const eventId = eventIdParam.parse(req.params.eventId);
       const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 50, 1), 200);
@@ -706,8 +782,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Get all events
   app.get("/api/events", authMiddleware, requireRole(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
     try {
-      const events = await storage.getAllEvents();
-      res.json(events);
+      const u = req.user!;
+      res.json(isPlatformAdmin(u) ? await storage.getAllEvents() : u.org ? await storage.getEventsByOrg(u.org) : []);
     } catch (error) {
       handleError(res, error);
     }
@@ -717,7 +793,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post("/api/events", authMiddleware, requireRole(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
     try {
       const data = eventInput.parse(req.body);
-      const event = await storage.createEvent(data);
+      const u = req.user!;
+      // Organizers always create events inside their own organization; platform admins may choose
+      const orgId = isPlatformAdmin(u) ? (data as any).orgId ?? null : u.org;
+      if (!orgId && !isPlatformAdmin(u)) return res.status(403).json({ error: "Your account is not assigned to an organization" });
+      const event = await storage.createEvent({ ...data, orgId } as any);
       await audit(req.user!.sub, "EVENT_CREATED", "event", event.id, { name: event.name });
       res.json(event);
     } catch (error) {
@@ -726,7 +806,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Get gates for event
-  app.get("/api/events/:eventId/gates", authMiddleware, requireRole(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  app.get("/api/events/:eventId/gates", authMiddleware, requireRole(...STAFF_ROLES), requireEventAccess(), async (req: AuthRequest, res: Response) => {
     try {
       const eventId = eventIdParam.parse(req.params.eventId);
       const gates = await storage.getGatesByEvent(eventId);
@@ -739,8 +819,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Get all gates (admin listing)
   app.get("/api/gates", authMiddleware, requireRole(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
     try {
-      const all = await storage.getAllGates();
-      res.json(all);
+      const u = req.user!;
+      res.json(isPlatformAdmin(u) ? await storage.getAllGates() : u.org ? await storage.getGatesByOrg(u.org) : []);
     } catch (error) {
       handleError(res, error);
     }
@@ -750,6 +830,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post("/api/gates", authMiddleware, requireRole(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
     try {
       const data = gateInput.parse(req.body);
+      if (!(await canAccessEvent(req.user!, data.eventId))) return res.status(404).json({ error: "Event not found" });
       const gate = await storage.createGate(data);
       await audit(req.user!.sub, "GATE_CREATED", "gate", gate.id, { eventId: gate.eventId, name: gate.name });
       res.json(gate);
@@ -763,6 +844,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const gateId = z.string().max(64).parse(req.params.gateId);
       const { isActive } = z.object({ isActive: z.boolean() }).parse(req.body);
+      const g = await storage.getGate(gateId);
+      if (!g || !(await canAccessEvent(req.user!, g.eventId))) return res.status(404).json({ error: "Gate not found" });
       await storage.updateGateStatus(gateId, isActive);
       await audit(req.user!.sub, isActive ? "GATE_OPENED" : "GATE_CLOSED", "gate", gateId);
       res.json({ success: true });
@@ -778,7 +861,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const attendeeId = z.string().max(64).parse(req.params.attendeeId);
       const attendee = await storage.getAttendee(attendeeId);
-      if (!attendee) return res.status(404).json({ error: "Attendee not found" });
+      if (!attendee || !(await canAccessEvent(req.user!, attendee.eventId))) return res.status(404).json({ error: "Attendee not found" });
       const revoked = await storage.revokeTicketsByAttendee(attendeeId);
       await audit(req.user!.sub, "TICKET_REVOKED", "attendee", attendeeId, { eventId: attendee.eventId, revoked });
       res.json({ revoked });
@@ -788,7 +871,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Event kill-switch: ENDED / CANCELLED events stop admitting people immediately
-  app.patch("/api/events/:eventId/status", authMiddleware, requireRole(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+  app.patch("/api/events/:eventId/status", authMiddleware, requireRole(...MANAGER_ROLES), requireEventAccess(), async (req: AuthRequest, res: Response) => {
     try {
       const eventId = eventIdParam.parse(req.params.eventId);
       const { status } = z.object({ status: z.enum(["DRAFT", "ACTIVE", "ENDED", "CANCELLED"]) }).parse(req.body);
@@ -802,7 +885,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Recent fraud alerts for an event
-  app.get("/api/events/:eventId/alerts", authMiddleware, requireRole(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+  app.get("/api/events/:eventId/alerts", authMiddleware, requireRole(...MANAGER_ROLES), requireEventAccess(), async (req: AuthRequest, res: Response) => {
     try {
       const eventId = eventIdParam.parse(req.params.eventId);
       const rows = await storage.getRecentAuditLogs("FRAUD_ALERT", eventId, 50);
@@ -818,6 +901,122 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/audit/verify", authMiddleware, requireRole("ADMIN"), async (_req: AuthRequest, res: Response) => {
     try {
       res.json(await storage.verifyAuditChain());
+    } catch (error) {
+      handleError(res, error);
+    }
+  });
+
+  // ============= ORGANIZATIONS, USERS & DATA RETENTION =============
+
+  // Active events the signed-in staff member can work with (scoped to their organization)
+  app.get("/api/me/events", authMiddleware, requireRole(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+    try {
+      const u = req.user!;
+      const list = isPlatformAdmin(u) ? await storage.getActiveEvents() : u.org ? await storage.getActiveEventsByOrg(u.org) : [];
+      res.json(list.map((e) => ({ id: e.id, name: e.name, venue: e.venue, startsAt: e.startsAt, endsAt: e.endsAt })));
+    } catch (error) {
+      handleError(res, error);
+    }
+  });
+
+  // Organizations (platform administrators only)
+  app.post("/api/orgs", authMiddleware, requireRole("ADMIN"), async (req: AuthRequest, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req.user!)) return res.status(403).json({ error: "Forbidden" });
+      const { name } = z.object({ name: z.string().trim().min(2).max(120) }).parse(req.body);
+      const org = await storage.createOrganization(name);
+      await audit(req.user!.sub, "ORG_CREATED", "organization", org.id, { name });
+      res.json(org);
+    } catch (error: any) {
+      if (error?.code === "23505") return res.status(400).json({ error: "An organization with that name already exists" });
+      handleError(res, error);
+    }
+  });
+
+  app.get("/api/orgs", authMiddleware, requireRole("ADMIN"), async (req: AuthRequest, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req.user!)) return res.status(403).json({ error: "Forbidden" });
+      res.json(await storage.listOrganizations());
+    } catch (error) {
+      handleError(res, error);
+    }
+  });
+
+  // Users: privileged accounts are created here by administrators (never by public sign-up)
+  app.get("/api/users", authMiddleware, requireRole("ADMIN"), async (req: AuthRequest, res: Response) => {
+    try {
+      const u = req.user!;
+      if (!isPlatformAdmin(u) && !u.org) return res.json([]);
+      res.json(await storage.listUsers(isPlatformAdmin(u) ? undefined : u.org!));
+    } catch (error) {
+      handleError(res, error);
+    }
+  });
+
+  app.post("/api/users", authMiddleware, requireRole("ADMIN"), async (req: AuthRequest, res: Response) => {
+    try {
+      const u = req.user!;
+      const body = z
+        .object({
+          email: z.string().trim().email().max(254),
+          password: z.string().min(10, "Password must be at least 10 characters").max(128),
+          role: z.enum(["ADMIN", "ORGANIZER", "STAFF"]),
+          orgId: z.string().max(64).nullable().optional(),
+        })
+        .parse(req.body);
+
+      // Organization admins can only create users inside their own organization; only platform
+      // administrators can create users without one (i.e. other platform administrators).
+      const orgId = isPlatformAdmin(u) ? body.orgId ?? null : u.org ?? null;
+      if (!isPlatformAdmin(u) && !orgId) return res.status(403).json({ error: "Forbidden" });
+      if (!orgId && body.role !== "ADMIN") return res.status(400).json({ error: "ORGANIZER and STAFF users need an organization" });
+      if (orgId && !(await storage.getOrganization(orgId))) return res.status(404).json({ error: "Organization not found" });
+
+      const email = normalizeEmail(body.email);
+      if (await storage.getUserByEmail(email)) return res.status(400).json({ error: "Unable to create a user with these details" });
+      const created = await storage.createUser({
+        email,
+        passwordHash: await hashPassword(body.password),
+        role: body.role,
+        status: "ACTIVE",
+        orgId,
+      } as any);
+      await audit(u.sub, "USER_CREATED", "user", created.id, { role: created.role, orgId });
+      res.json({ id: created.id, email: created.email, role: created.role, status: created.status, orgId: created.orgId });
+    } catch (error) {
+      handleError(res, error);
+    }
+  });
+
+  app.patch("/api/users/:userId/status", authMiddleware, requireRole("ADMIN"), async (req: AuthRequest, res: Response) => {
+    try {
+      const u = req.user!;
+      const userId = z.string().max(64).parse(req.params.userId);
+      const { status } = z.object({ status: z.enum(["ACTIVE", "INACTIVE", "SUSPENDED"]) }).parse(req.body);
+      if (userId === u.sub) return res.status(400).json({ error: "You cannot change your own status" });
+      const target = await storage.getUser(userId);
+      if (!target || (!isPlatformAdmin(u) && target.orgId !== u.org)) return res.status(404).json({ error: "User not found" });
+      await storage.updateUserStatus(userId, status);
+      if (status !== "ACTIVE") await storage.revokeAllRefreshTokensForUser(userId); // end their sessions now
+      await audit(u.sub, "USER_STATUS_CHANGED", "user", userId, { status });
+      res.json({ success: true, status });
+    } catch (error) {
+      handleError(res, error);
+    }
+  });
+
+  // Data retention / right to erasure: after an event is over, personal data of its attendees can be
+  // replaced with irreversible placeholders (check-in history and counts are kept).
+  app.post("/api/events/:eventId/anonymize", authMiddleware, requireRole(...MANAGER_ROLES), requireEventAccess(), async (req: AuthRequest, res: Response) => {
+    try {
+      const eventId = eventIdParam.parse(req.params.eventId);
+      const event = await storage.getEvent(eventId);
+      if (!event || (event.status !== "ENDED" && event.status !== "CANCELLED")) {
+        return res.status(409).json({ error: "Only ENDED or CANCELLED events can be anonymized" });
+      }
+      const anonymized = await storage.anonymizeEventAttendees(eventId);
+      await audit(req.user!.sub, "ATTENDEES_ANONYMIZED", "event", eventId, { eventId, anonymized });
+      res.json({ anonymized });
     } catch (error) {
       handleError(res, error);
     }

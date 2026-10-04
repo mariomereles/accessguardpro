@@ -31,7 +31,15 @@ async function refreshSession(): Promise<boolean> {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ refreshToken }),
     });
-    if (!response.ok) return false;
+    if (!response.ok) {
+      // Refresh tokens are single use: if another tab just rotated it, pick up its new tokens
+      const current = localStorage.getItem("refreshToken");
+      if (current && current !== refreshToken) {
+        authToken = localStorage.getItem("authToken");
+        return true;
+      }
+      return false;
+    }
     const data = await response.json();
     setAuthToken(data.accessToken);
     setRefreshToken(data.refreshToken);
@@ -207,6 +215,22 @@ export const api = {
       method: "POST",
       body: JSON.stringify(gateData),
     });
+  },
+
+  // Ends the session on the server too (revokes the refresh token family)
+  logout: async () => {
+    const refreshToken = localStorage.getItem("refreshToken");
+    if (refreshToken) {
+      await fetch(`${API_BASE}/auth/logout`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refreshToken }),
+      }).catch(() => {});
+    }
+  },
+
+  getMyEvents: async () => {
+    return fetchAPI("/me/events");
   },
 
   // Auth helpers

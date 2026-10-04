@@ -60,8 +60,8 @@ openssl rsa -in private.pem -pubout -out public.pem
 
 5. **Set up database**
 ```bash
-# Push schema to database
-npm run db:push
+# Apply the versioned migrations (safe to repeat; also upgrades older databases)
+npm run db:migrate
 
 # Seed with sample data (creates admin user)
 npx tsx server/seed.ts

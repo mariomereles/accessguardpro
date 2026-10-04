@@ -9,7 +9,7 @@ import { eq } from "drizzle-orm";
 // Idempotent and non-destructive: safe to run more than once, never deletes existing data.
 // Passwords come from SEED_ADMIN_PASSWORD / SEED_STAFF_PASSWORD; if unset, a random one is
 // generated and printed once (there are no well-known default credentials).
-async function ensureUser(email: string, role: "ADMIN" | "STAFF", envVar: string) {
+async function ensureUser(email: string, role: "ADMIN" | "STAFF", envVar: string, orgId: string | null) {
   const [existing] = await db.select().from(users).where(eq(users.email, email)).limit(1);
   if (existing) {
     console.log(`User exists, left untouched: ${email}`);
@@ -17,7 +17,7 @@ async function ensureUser(email: string, role: "ADMIN" | "STAFF", envVar: string
   }
   const password = process.env[envVar] || crypto.randomBytes(12).toString("base64url");
   const generated = !process.env[envVar];
-  await storage.createUser({ email, passwordHash: await hashPassword(password), role, status: "ACTIVE" });
+  await storage.createUser({ email, passwordHash: await hashPassword(password), role, status: "ACTIVE", orgId } as any);
   console.log(`Created ${role}: ${email}${generated ? `  password: ${password}   (shown once, change it after first login)` : ""}`);
   return password;
 }
@@ -25,8 +25,12 @@ async function ensureUser(email: string, role: "ADMIN" | "STAFF", envVar: string
 async function seed() {
   console.log("Seeding database...");
 
-  await ensureUser(process.env.SEED_ADMIN_EMAIL || "admin@event.com", "ADMIN", "SEED_ADMIN_PASSWORD");
-  await ensureUser(process.env.SEED_STAFF_EMAIL || "staff@event.com", "STAFF", "SEED_STAFF_PASSWORD");
+  // The seed admin is a platform administrator (no organization); staff and events belong to "Default"
+  const orgs = await storage.listOrganizations();
+  const org = orgs.find((o) => o.name === "Default") ?? orgs[0] ?? (await storage.createOrganization("Default"));
+
+  await ensureUser(process.env.SEED_ADMIN_EMAIL || "admin@event.com", "ADMIN", "SEED_ADMIN_PASSWORD", null);
+  await ensureUser(process.env.SEED_STAFF_EMAIL || "staff@event.com", "STAFF", "SEED_STAFF_PASSWORD", org.id);
 
   const existingEvents = await storage.getAllEvents();
   if (existingEvents.length > 0) {
@@ -46,7 +50,8 @@ async function seed() {
     startsAt: starts,
     endsAt: ends,
     status: "ACTIVE",
-  });
+    orgId: org.id,
+  } as any);
   console.log("Created event:", event.name, event.id);
 
   for (const g of [

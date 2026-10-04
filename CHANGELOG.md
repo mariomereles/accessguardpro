@@ -4,6 +4,16 @@ All notable changes to AccessGuard Pro will be documented in this file.
 
 ## [Unreleased]
 
+### Enterprise
+- Multi-tenancy: `organizations`; ORGANIZER/STAFF users and events belong to one, platform administrators (ADMIN without organization) see all. Every event/gate/attendee endpoint, the check-in and the real-time channel enforce the tenant boundary (404 for other tenants' ids).
+- User administration API: `POST/GET /api/users`, `PATCH /api/users/:id/status` (suspending ends sessions at once), `POST/GET /api/orgs`. Organizers now reach the admin area.
+- Sessions: refresh tokens are stored server-side, single use and rotated; reuse of a retired token revokes the whole session; `POST /api/auth/logout`.
+- Versioned SQL migrations (`npm run db:migrate`, idempotent baseline that also upgrades databases created with `drizzle-kit push`) replace `push --force` in the build.
+- Production refuses to start without valid `JWT_PRIVATE_KEY`/`JWT_PUBLIC_KEY` (escape hatch: `ALLOW_EPHEMERAL_JWT_KEYS=true`).
+- Observability: `/health` checks the database, `/metrics` (Prometheus, enabled with `METRICS_TOKEN`), one JSON log line per request in production.
+- Data retention: `POST /api/events/:id/anonymize` replaces attendee personal data after an event ends (audited).
+
+
 ### Anti-fraud
 - Rotating ticket QR: `AG1.<jti>.<30 s window>.<HMAC>` derived on the attendee's device from a per-ticket secret; screenshots stop working within ~90 s. Legacy static QR codes are rejected for tickets that have a secret. Codes are 57 chars (easy to scan).
 - Fraud signals with real-time alerts and a dashboard panel: ticket reused at another gate, repeated reuse, bursts of rejected scans from one account.

@@ -10,6 +10,9 @@ import {
   checkins,
   metricsCounters,
   auditLogs,
+  organizations,
+  refreshTokens,
+  type Organization,
   type User,
   type InsertUser,
   type Event,
@@ -385,6 +388,97 @@ export class DatabaseStorage implements IStorage {
     if (filter?.entityId) conds.push(eq(auditLogs.entityId, filter.entityId));
     const [row] = await db.select({ count: sql<number>`count(*)::int` }).from(auditLogs).where(and(...conds));
     return row?.count || 0;
+  }
+
+  // Refresh tokens (rotation + reuse detection)
+  async createRefreshToken(row: { id: string; userId: string; familyId: string; expiresAt: Date }): Promise<void> {
+    await db.insert(refreshTokens).values(row);
+  }
+
+  async getRefreshToken(id: string) {
+    const [row] = await db.select().from(refreshTokens).where(eq(refreshTokens.id, id)).limit(1);
+    return row;
+  }
+
+  // Marks a token as used. Returns false if another request already rotated it.
+  async consumeRefreshToken(id: string): Promise<boolean> {
+    const rows = await db
+      .update(refreshTokens)
+      .set({ revokedAt: new Date() })
+      .where(and(eq(refreshTokens.id, id), sql`${refreshTokens.revokedAt} is null`))
+      .returning({ id: refreshTokens.id });
+    return rows.length === 1;
+  }
+
+  async revokeRefreshFamily(familyId: string): Promise<void> {
+    await db
+      .update(refreshTokens)
+      .set({ revokedAt: new Date() })
+      .where(and(eq(refreshTokens.familyId, familyId), sql`${refreshTokens.revokedAt} is null`));
+  }
+
+  async revokeAllRefreshTokensForUser(userId: string): Promise<void> {
+    await db
+      .update(refreshTokens)
+      .set({ revokedAt: new Date() })
+      .where(and(eq(refreshTokens.userId, userId), sql`${refreshTokens.revokedAt} is null`));
+  }
+
+  async deleteExpiredRefreshTokens(): Promise<void> {
+    await db.delete(refreshTokens).where(sql`${refreshTokens.expiresAt} < now() - interval '1 day'`);
+  }
+
+  // Organizations and tenant scoping
+  async createOrganization(name: string): Promise<Organization> {
+    const [org] = await db.insert(organizations).values({ name }).returning();
+    return org;
+  }
+
+  async getOrganization(id: string): Promise<Organization | undefined> {
+    const [org] = await db.select().from(organizations).where(eq(organizations.id, id)).limit(1);
+    return org;
+  }
+
+  async listOrganizations(): Promise<Organization[]> {
+    return db.select().from(organizations).orderBy(organizations.name);
+  }
+
+  async getEventsByOrg(orgId: string): Promise<Event[]> {
+    return db.select().from(events).where(eq(events.orgId, orgId)).orderBy(desc(events.startsAt));
+  }
+
+  async getActiveEventsByOrg(orgId: string): Promise<Event[]> {
+    return db.select().from(events).where(and(eq(events.orgId, orgId), eq(events.status, "ACTIVE"))).orderBy(events.startsAt);
+  }
+
+  async getGatesByOrg(orgId: string): Promise<Gate[]> {
+    const rows = await db
+      .select({ gate: gates })
+      .from(gates)
+      .innerJoin(events, eq(gates.eventId, events.id))
+      .where(eq(events.orgId, orgId));
+    return rows.map((r) => r.gate);
+  }
+
+  async listUsers(orgId?: string): Promise<Array<Pick<User, "id" | "email" | "role" | "status" | "orgId" | "createdAt">>> {
+    const q = db
+      .select({ id: users.id, email: users.email, role: users.role, status: users.status, orgId: users.orgId, createdAt: users.createdAt })
+      .from(users);
+    return orgId ? q.where(eq(users.orgId, orgId)).orderBy(users.email) : q.orderBy(users.email);
+  }
+
+  // Data retention: replace personal data of an attendee with irreversible placeholders
+  async anonymizeEventAttendees(eventId: string): Promise<number> {
+    const rows = await db.execute(sql`
+      update attendees set
+        full_name = 'Anonymized',
+        email = 'anon-' || substr(md5(id), 1, 12) || '@anonymized.invalid',
+        phone = 'anonymized',
+        doc_type = 'ANON',
+        doc_number = 'anon-' || substr(md5(id || 'doc'), 1, 12)
+      where event_id = ${eventId} and email not like '%@anonymized.invalid'
+      returning id`);
+    return (rows as any[]).length;
   }
 
   // Tickets
