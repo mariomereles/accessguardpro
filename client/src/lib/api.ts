@@ -213,6 +213,16 @@ export const api = {
     return fetchAPI(`/events/${eventId}/anonymize`, { method: "POST" });
   },
 
+  getAttendees: async (eventId: string, params: { q?: string; limit?: number; offset?: number } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.q) qs.set("q", params.q);
+    qs.set("limit", String(params.limit ?? 25));
+    qs.set("offset", String(params.offset ?? 0));
+    return fetchAPI(`/events/${eventId}/attendees?${qs}`);
+  },
+
+  revokeAttendee: async (attendeeId: string) => fetchAPI(`/attendees/${attendeeId}/revoke`, { method: "POST" }),
+
   // Organizations and users
   listOrgs: async () => fetchAPI("/orgs"),
   createOrg: async (name: string) => fetchAPI("/orgs", { method: "POST", body: JSON.stringify({ name }) }),

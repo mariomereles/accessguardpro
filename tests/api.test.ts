@@ -514,3 +514,36 @@ test("production refuses to start without JWT keys unless explicitly allowed", (
   assert.notEqual(bad.status, 0);
   assert.match(bad.stderr, /not valid PEM keys/);
 });
+
+test("attendee list is for managers of the event's organization, searchable, paginated and without sensitive fields", async () => {
+  const tag = `lst${run}`;
+  const a1 = await attendee(eventId, `${tag}a`);
+  await attendee(eventId, `${tag}b`);
+  assert.equal((await staffScan(a1, gateOpen)).json.result, "OK");
+
+  assert.equal((await call("GET", `/api/events/${eventId}/attendees`, { token: staffToken })).status, 403, "staff are not managers");
+  assert.equal((await call("GET", `/api/events/${eventId}/attendees`, { token: userToken })).status, 403);
+  assert.equal((await call("GET", `/api/events/${eventB}/attendees`, { token: organizerToken })).status, 404, "other organization");
+
+  const found = await call("GET", `/api/events/${eventId}/attendees?q=${tag}`, { token: organizerToken });
+  assert.equal(found.status, 200);
+  assert.equal(found.json.total, 2);
+  assert.ok(!/phone|docNumber|doc_number|passwordHash|secret/i.test(JSON.stringify(found.json)));
+  const entered = found.json.items.find((x: any) => x.id === a1.attendee.id);
+  assert.equal(entered.entered, true);
+  assert.equal(found.json.items.find((x: any) => x.id !== a1.attendee.id).entered, false);
+
+  const page1 = await call("GET", `/api/events/${eventId}/attendees?q=${tag}&limit=1&offset=0`, { token: orgAdminToken });
+  const page2 = await call("GET", `/api/events/${eventId}/attendees?q=${tag}&limit=1&offset=1`, { token: orgAdminToken });
+  assert.equal(page1.json.items.length, 1);
+  assert.equal(page2.json.items.length, 1);
+  assert.notEqual(page1.json.items[0].id, page2.json.items[0].id);
+  assert.equal(page1.json.total, 2);
+
+  // wildcard characters are literal, not patterns
+  assert.equal((await call("GET", `/api/events/${eventId}/attendees?q=%25`, { token: organizerToken })).json.total, 0);
+
+  await call("POST", `/api/attendees/${a1.attendee.id}/revoke`, { token: organizerToken });
+  const after = await call("GET", `/api/events/${eventId}/attendees?q=${tag}a`, { token: organizerToken });
+  assert.equal(after.json.items[0].revoked, true);
+});

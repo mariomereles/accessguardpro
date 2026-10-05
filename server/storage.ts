@@ -481,6 +481,35 @@ export class DatabaseStorage implements IStorage {
     return (rows as any[]).length;
   }
 
+  // Paginated attendee listing for the admin UI (no phone / document number)
+  async searchAttendees(eventId: string, opts: { q?: string; limit: number; offset: number }) {
+    const like = opts.q ? `%${opts.q.replace(/[\\%_]/g, (c) => "\\" + c)}%` : null;
+    const filter = like ? sql`and (a.full_name ilike ${like} or a.email ilike ${like})` : sql``;
+    const [rows, totalRows] = await Promise.all([
+      db.execute(sql`
+        select a.id, a.full_name, a.email, a.ticket_type, a.created_at,
+          exists (select 1 from checkins c where c.attendee_id = a.id and c.event_id = a.event_id and c.result = 'OK') as entered,
+          coalesce((select bool_and(t.revoked_at is not null) from tickets t where t.attendee_id = a.id), false) as revoked
+        from attendees a
+        where a.event_id = ${eventId} ${filter}
+        order by a.created_at desc, a.id
+        limit ${opts.limit} offset ${opts.offset}`),
+      db.execute(sql`select count(*)::int as n from attendees a where a.event_id = ${eventId} ${filter}`),
+    ]);
+    return {
+      total: (totalRows as any[])[0]?.n ?? 0,
+      items: (rows as any[]).map((r) => ({
+        id: r.id,
+        fullName: r.full_name,
+        email: r.email,
+        ticketType: r.ticket_type,
+        createdAt: r.created_at,
+        entered: !!r.entered,
+        revoked: !!r.revoked,
+      })),
+    };
+  }
+
   // Tickets
   async revokeTicketsByAttendee(attendeeId: string): Promise<number> {
     const rows = await db

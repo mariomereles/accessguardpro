@@ -9,6 +9,8 @@ All notable changes to AccessGuard Pro will be documented in this file.
 - **Events** page rewritten: create events, end/cancel/reopen them, remove attendees' personal data after the event; it now shows the real fields (it read non-existent ones before). **Activity** page fixed the same way.
 - Organizers reach the admin area; the sidebar only shows what the signed-in role can use.
 
+- **Attendees** page now works: pick an event, search by name or email, paginate, see Registered/Entered/Revoked status and revoke tickets (`GET /api/events/:id/attendees`, managers of the event's organization only; phone and document number are never returned).
+
 ### Enterprise
 - Multi-tenancy: `organizations`; ORGANIZER/STAFF users and events belong to one, platform administrators (ADMIN without organization) see all. Every event/gate/attendee endpoint, the check-in and the real-time channel enforce the tenant boundary (404 for other tenants' ids).
 - User administration API: `POST/GET /api/users`, `PATCH /api/users/:id/status` (suspending ends sessions at once), `POST/GET /api/orgs`. Organizers now reach the admin area.

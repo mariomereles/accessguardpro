@@ -714,6 +714,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Attendees of an event (managers; no phone or document number)
+  app.get("/api/events/:eventId/attendees", authMiddleware, requireRole(...MANAGER_ROLES), requireEventAccess(), async (req: AuthRequest, res: Response) => {
+    try {
+      const eventId = eventIdParam.parse(req.params.eventId);
+      const q = z.string().trim().max(100).optional().parse(req.query.q) || undefined;
+      const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 25, 1), 100);
+      const offset = Math.max(parseInt(req.query.offset as string) || 0, 0);
+      res.json(await storage.searchAttendees(eventId, { q, limit, offset }));
+    } catch (error) {
+      handleError(res, error);
+    }
+  });
+
   // Entries over time per gate (real data for the dashboard chart)
   app.get("/api/events/:eventId/timeseries", authMiddleware, requireRole(...STAFF_ROLES), requireEventAccess(), async (req: AuthRequest, res: Response) => {
     try {
