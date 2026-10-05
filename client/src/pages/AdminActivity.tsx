@@ -10,7 +10,8 @@ export default function AdminActivity() {
     queryFn: () => api.getAllEvents(),
   });
 
-  const eventId = events?.[0]?.id;
+  // Prefer an open event; fall back to the most recent one
+  const eventId = (events?.find((e: any) => e.status === "ACTIVE") ?? events?.[0])?.id;
 
   const { data: checkins } = useQuery({
     queryKey: ["/api/checkins", eventId],
@@ -44,24 +45,24 @@ export default function AdminActivity() {
                 className="flex items-center justify-between p-3 border rounded-lg"
               >
                 <div className="flex items-center gap-3">
-                  {checkin.status === "SUCCESS" ? (
+                  {checkin.result === "OK" ? (
                     <CheckCircle className="w-5 h-5 text-green-500" />
                   ) : (
                     <XCircle className="w-5 h-5 text-red-500" />
                   )}
                   <div>
-                    <p className="font-medium">{checkin.attendeeName || "Unknown"}</p>
+                    <p className="font-medium">{checkin.attendee?.fullName || "Unknown"}</p>
                     <p className="text-sm text-muted-foreground">
-                      Gate: {checkin.gateName || "Unknown"}
+                      Gate: {checkin.gate?.name || "Unknown"}
                     </p>
                   </div>
                 </div>
                 <div className="text-right">
-                  <Badge variant={checkin.status === "SUCCESS" ? "default" : "destructive"}>
-                    {checkin.status}
+                  <Badge variant={checkin.result === "OK" ? "default" : checkin.result === "DUP" ? "secondary" : "destructive"}>
+                    {checkin.result}
                   </Badge>
                   <p className="text-xs text-muted-foreground mt-1">
-                    {new Date(checkin.checkedInAt).toLocaleTimeString()}
+                    {new Date(checkin.timestamp).toLocaleTimeString()}
                   </p>
                 </div>
               </div>

@@ -9,6 +9,8 @@ import {
   Ticket,
   LogOut,
   User,
+  Building2,
+  UserCog,
 } from "lucide-react";
 import {
   Sidebar,
@@ -42,7 +44,7 @@ const staffItems = [
 
 export function AppSidebar() {
   const [location] = useLocation();
-  const { user, logout, isAdmin } = useAuth();
+  const { user, logout, isAdmin, isManager, isPlatformAdmin } = useAuth();
   const { toast } = useToast();
 
   const handleLogout = () => {
@@ -53,7 +55,13 @@ export function AppSidebar() {
     });
   };
 
-  const items = isAdmin ? adminItems : staffItems;
+  const items = isManager
+    ? [
+        ...adminItems,
+        ...(isAdmin ? [{ title: "Users", url: "/admin/users", icon: UserCog }] : []),
+        ...(isPlatformAdmin ? [{ title: "Organizations", url: "/admin/organizations", icon: Building2 }] : []),
+      ]
+    : staffItems;
 
   return (
     <Sidebar data-testid="sidebar-main">

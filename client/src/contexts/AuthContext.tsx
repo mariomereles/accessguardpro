@@ -5,6 +5,7 @@ interface User {
   id: string;
   email: string;
   role: string;
+  orgId?: string | null;
 }
 
 interface AuthContextType {
@@ -15,6 +16,7 @@ interface AuthContextType {
   isAuthenticated: boolean;
   isAdmin: boolean;
   isManager: boolean;
+  isPlatformAdmin: boolean;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -71,6 +73,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
     isAuthenticated: !!user,
     isAdmin: user?.role === 'ADMIN',
     isManager: user?.role === 'ADMIN' || user?.role === 'ORGANIZER',
+    // ADMIN without an organization manages every tenant
+    isPlatformAdmin: user?.role === 'ADMIN' && !user?.orgId,
   };
 
   return (

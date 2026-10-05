@@ -236,7 +236,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const { accessToken, refreshToken } = await issueSession(user);
       await audit(user.id, "REGISTER", "user", user.id, { ip: req.ip });
 
-      res.json({ user: { id: user.id, email: user.email, role: user.role }, accessToken, refreshToken });
+      res.json({ user: { id: user.id, email: user.email, role: user.role, orgId: user.orgId ?? null }, accessToken, refreshToken });
     } catch (error) {
       handleError(res, error);
     }
@@ -262,7 +262,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const { accessToken, refreshToken } = await issueSession(user);
 
-      res.json({ user: { id: user.id, email: user.email, role: user.role }, accessToken, refreshToken });
+      res.json({ user: { id: user.id, email: user.email, role: user.role, orgId: user.orgId ?? null }, accessToken, refreshToken });
     } catch (error) {
       handleError(res, error);
     }

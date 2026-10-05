@@ -205,6 +205,23 @@ export const api = {
     });
   },
 
+  setEventStatus: async (eventId: string, status: string) => {
+    return fetchAPI(`/events/${eventId}/status`, { method: "PATCH", body: JSON.stringify({ status }) });
+  },
+
+  anonymizeEvent: async (eventId: string) => {
+    return fetchAPI(`/events/${eventId}/anonymize`, { method: "POST" });
+  },
+
+  // Organizations and users
+  listOrgs: async () => fetchAPI("/orgs"),
+  createOrg: async (name: string) => fetchAPI("/orgs", { method: "POST", body: JSON.stringify({ name }) }),
+  listUsers: async () => fetchAPI("/users"),
+  createUser: async (data: { email: string; password: string; role: string; orgId?: string | null }) =>
+    fetchAPI("/users", { method: "POST", body: JSON.stringify(data) }),
+  setUserStatus: async (userId: string, status: string) =>
+    fetchAPI(`/users/${userId}/status`, { method: "PATCH", body: JSON.stringify({ status }) }),
+
   // Gates admin
   getGates: async () => {
     return fetchAPI("/gates");

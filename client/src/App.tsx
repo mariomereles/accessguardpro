@@ -21,6 +21,8 @@ import AdminAttendees from "@/pages/AdminAttendees";
 import AdminEvents from "@/pages/AdminEvents";
 import AdminActivity from "@/pages/AdminActivity";
 import StaffScanner from "@/pages/StaffScanner";
+import AdminUsers from "@/pages/AdminUsers";
+import AdminOrganizations from "@/pages/AdminOrganizations";
 
 function Router() {
   return (
@@ -43,6 +45,8 @@ function AdminRouter() {
       <Route path="/admin/attendees" component={AdminAttendees} />
       <Route path="/admin/events" component={AdminEvents} />
       <Route path="/admin/activity" component={AdminActivity} />
+      <Route path="/admin/users" component={AdminUsers} />
+      <Route path="/admin/organizations" component={AdminOrganizations} />
       <Route component={NotFound} />
     </Switch>
   );
